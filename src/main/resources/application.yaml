@@ -9,6 +9,21 @@ spring:
       # si no coinciden, la aplicación no arranca.
       ddl-auto: validate
 
+# Actuator: solo lo necesario para operar. Endpoints como env, beans o heapdump revelan
+# configuración interna, por eso no se exponen.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+  endpoint:
+    health:
+      # Sin detalles (nombre de la base, espacio en disco...) para quien consulte desde afuera.
+      show-details: never
+      # /actuator/health/liveness y /actuator/health/readiness para las sondas de Kubernetes.
+      probes:
+        enabled: true
+
 # Core bancario legado.
 # URL y credenciales llegan SOLO por variables de entorno (en Kubernetes, desde un Secret).
 # El valor vacío después de ":" es intencional: si la variable no existe, la propiedad queda vacía,

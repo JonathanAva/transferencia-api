@@ -124,6 +124,15 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+				<executions>
+					<execution>
+						<!-- Genera META-INF/build-info.properties: /actuator/info muestra la versión exacta
+						     desplegada (en el incidente nadie notó que en prod corría un SNAPSHOT). -->
+						<goals>
+							<goal>build-info</goal>
+						</goals>
+					</execution>
+				</executions>
 			</plugin>
 			<plugin>
 				<!-- Cobertura de pruebas. El build FALLA en "verify" si la cobertura de líneas baja de 80 %.
