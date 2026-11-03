@@ -22,6 +22,41 @@ Validar el contrato:
 npx --yes @redocly/cli@2.64.1 lint
 ```
 
+## Cadena de timeouts
+
+Cada eslabón debe esperar **más** que el siguiente. Si no, alguien se rinde mientras el de atrás
+todavía está trabajando, y un reintento puede duplicar la transferencia.
+
+```
+app móvil (30 s)  >  gateway Kong (20 s)  >  API → core, lectura (15 s)  >  p95 del core (medido)
+```
+
+| Eslabón | Valor de referencia | Configuración |
+|---|---|---|
+| App móvil | 30 s | Cliente HTTP de la app |
+| Gateway (Kong) | 20 s | `read_timeout` del servicio en Kong (Fase 7) |
+| API → core (lectura) | 15 s | `CORE_TIMEOUT_LECTURA` |
+| API → core (conexión) | 2 s | `CORE_TIMEOUT_CONEXION` (debe ser menor que la lectura) |
+| Core | p95 medido por ambiente | Monitoreo; en el incidente el p95 fue 9.8 s con timeout de 5 s |
+| Llave atrapada | lectura + 30 s = 45 s | `IDEMPOTENCIA_MARGEN_EN_PROCESO` |
+
+**¿Qué pasa si alguien se rinde antes?**
+
+- **La app se rinde antes que la API** (por ejemplo, su timeout es menor) y reintenta con la **misma**
+  llave mientras la primera solicitud sigue esperando al core → `409 SOLICITUD_EN_PROCESO`. No se llama otra
+  vez al core ni se duplica nada. La app reintenta en unos segundos y, cuando la primera termina, recibe la
+  respuesta guardada (`Idempotent-Replayed: true`).
+- **El gateway se rinde antes que la API** → la app recibe un 504 de Kong, pero la API sigue y guarda el
+  resultado; el reintento con la misma llave recibe 409 o la respuesta guardada.
+- **La API se rinde ante el core** (timeout de lectura) → `504 CORE_TIMEOUT`, transferencia
+  `PENDIENTE_CONFIRMACION`, llave cerrada: los reintentos reciben siempre ese 504 guardado.
+- **El pod de la API muere a mitad de la llamada** → la llave queda `EN_PROCESO`. Pasado
+  *timeout de lectura + margen*, el siguiente reintento la cierra como incierta (`504`,
+  `PENDIENTE_CONFIRMACION`). Nunca se libera, porque el core pudo haber recibido la transferencia.
+
+La regla para la app: **un reintento siempre usa la misma `X-Idempotency-Key`**. Una llave nueva solo
+para una transferencia nueva.
+
 ## Supuestos
 
 Decisiones tomadas donde el enunciado no define el comportamiento:
@@ -62,3 +97,17 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
 14. **Glosa vacía:** si el concepto queda vacío tras quitar caracteres no ASCII (por ejemplo, solo
     emojis), se envía la glosa `TRANSFERENCIA`.
 15. **Monto hacia el core:** siempre con 2 decimales (`100` → `100.00`).
+16. **Monto con más de 2 decimales escritos:** `150.750` se rechaza (400) aunque valga lo mismo que
+    `150.75`; se aplica literalmente "máximo 2 decimales".
+17. **Huella de la solicitud (idempotencia):** SHA-256 del *contenido* interpretado, no del texto JSON. El
+    orden de los campos, los espacios o el offset de la fecha (si es el mismo instante) no la cambian.
+18. **Llave atrapada:** una llave `EN_PROCESO` por más de *timeout de lectura + margen* (por defecto
+    15 s + 30 s) se cierra como resultado incierto (`504 CORE_TIMEOUT`, `PENDIENTE_CONFIRMACION`). Nunca se
+    libera automáticamente ni se vuelve a llamar al core.
+19. **Error inesperado tras reservar la llave:** se responde 500 y la llave queda `EN_PROCESO`; pasado el
+    umbral se cierra como incierta (conservador: nunca se libera algo que pudo llegar al core).
+20. **Llaves vencidas:** pasadas 24 h (`IDEMPOTENCIA_EXPIRACION`) la llave se borra al reutilizarse y se
+    trata como nueva. Una purga periódica de llaves vencidas queda fuera del alcance.
+21. **Errores de Spring no listados en el contrato** (ruta inexistente, 405, 415): Problem Details con
+    `codigo` `SOLICITUD_INVALIDA` y su status real.
+22. **`Location`:** ruta relativa (`/transferencias/{id}`), válida según RFC 9110 y correcta detrás del gateway.

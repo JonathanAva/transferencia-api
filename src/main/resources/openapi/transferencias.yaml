@@ -32,6 +32,14 @@ info:
     transferencia con estado `PENDIENTE_CONFIRMACION` y la app debe reintentar **con la misma llave**
     (recibirá la respuesta guardada) o consultar `GET /transferencias/{id}`.
 
+    ## Cadena de timeouts
+    Cada eslabón debe esperar **más** que el siguiente:
+    `timeout de la app` > `timeout del gateway` > `timeout de lectura de la API hacia el core` > `p95 del core`
+    (valores de referencia: 30 s > 20 s > 15 s > p95 medido del core).
+    Si la app se rinde antes y reintenta con la **misma** llave mientras la primera solicitud sigue en
+    curso, recibe `409 SOLICITUD_EN_PROCESO` (no se duplica nada) y debe volver a intentar en unos segundos
+    hasta recibir la respuesta guardada. **Nunca** debe reintentar con una llave nueva.
+
     ## Errores
     Todos los errores de la API usan **Problem Details (RFC 9457)** con media type
     `application/problem+json` y los campos de extensión `codigo` (código de negocio estable,
@@ -167,7 +175,12 @@ paths:
         '401':
           $ref: '#/components/responses/NoAutorizadoGateway'
         '409':
-          description: Ya hay una solicitud en proceso con la misma `X-Idempotency-Key`.
+          description: |
+            Ya hay una solicitud en proceso con la misma `X-Idempotency-Key` (por ejemplo, la app se rindió
+            antes que la API y reintentó). No se duplica nada: reintente en unos segundos con la misma llave.
+            Si la solicitud original quedó atascada (el proceso murió a mitad de la llamada al core), tras
+            *timeout de lectura del core + margen* deja de responderse 409 y se responde `504 CORE_TIMEOUT`
+            con la transferencia `PENDIENTE_CONFIRMACION`.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/CorrelationId'
@@ -290,9 +303,10 @@ paths:
                     correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
         '504':
           description: |
-            El core no respondió dentro del tiempo configurado (`CORE_TIMEOUT`). El resultado es
-            **desconocido**: la transferencia se guarda como `PENDIENTE_CONFIRMACION`. Reintente con la
-            **misma** `X-Idempotency-Key` o consulte la transferencia; nunca con una llave nueva.
+            El core no respondió dentro del tiempo configurado (`CORE_TIMEOUT`), o la solicitud original con
+            esta llave nunca terminó (proceso caído a mitad de la llamada). El resultado es **desconocido**:
+            la transferencia se guarda como `PENDIENTE_CONFIRMACION`. Reintente con la **misma**
+            `X-Idempotency-Key` o consulte la transferencia; nunca con una llave nueva.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/CorrelationId'
