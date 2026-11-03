@@ -32,6 +32,8 @@
 		<wiremock.version>3.13.2</wiremock.version>
 		<!-- No administrada por Spring Boot. 0.8.16 tiene menos de 2 semanas publicada; se usa la anterior estable. -->
 		<jacoco.version>0.8.15</jacoco.version>
+		<!-- Hora del build en formato ISO-8601 UTC, para build-info (/actuator/info). -->
+		<maven.build.timestamp.format>yyyy-MM-dd'T'HH:mm:ss'Z'</maven.build.timestamp.format>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -131,6 +133,10 @@
 						<goals>
 							<goal>build-info</goal>
 						</goals>
+						<configuration>
+							<!-- Sin esto se usa la fecha fija de los builds reproducibles (1980-02-01). -->
+							<time>${maven.build.timestamp}</time>
+						</configuration>
 					</execution>
 				</executions>
 			</plugin>

@@ -56,7 +56,9 @@ class ConfiguracionOperativaTest {
         mvc.perform(get("/actuator/info"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.build.artifact").value("transferencia-api"))
-                .andExpect(jsonPath("$.build.version").isNotEmpty());
+                .andExpect(jsonPath("$.build.version").isNotEmpty())
+                .andExpect(jsonPath("$.build.time").value(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.startsWith("1980"))));
     }
 
     @ParameterizedTest
