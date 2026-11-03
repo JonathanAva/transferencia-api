@@ -1,0 +1,162 @@
+# Integración continua: corre en cada push a main y en cada pull request.
+#
+#   contrato ─┐
+#   build ────┴─► imagen
+#
+# - contrato: lint del contrato OpenAPI con Redocly.
+# - build:    mvnw verify (pruebas + gate de cobertura ≥ 80 %), verifica que las pruebas realmente corrieron,
+#             publica reportes y el jar probado como artefactos.
+# - imagen:   construye la imagen Docker con ESE MISMO jar (no recompila) y la arranca (prueba de humo).
+#
+# Seguridad del workflow:
+# - Actions fijadas por SHA completo del commit: un tag (v7) se puede mover a otro código; un SHA no.
+# - permissions: contents: read. El GITHUB_TOKEN de este workflow solo puede leer el repositorio.
+# - checkout sin persist-credentials: el token no queda guardado en .git/config para los pasos siguientes.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Si llega un push nuevo a la misma rama, se cancela el run anterior (ya no importa su resultado).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contrato:
+    name: Lint del contrato OpenAPI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Lint con Redocly (reglas en redocly.yaml)
+        run: npx --yes @redocly/cli@2.64.1 lint
+
+  build:
+    name: Build, pruebas y cobertura
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      jar-sha256: ${{ steps.artefacto.outputs.sha256 }}
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Instalar JDK 21 (Temurin)
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # Testcontainers usa el Docker que ya trae el runner para levantar PostgreSQL real.
+      # El gate de cobertura (JaCoCo check, líneas ≥ 80 %) corre dentro de verify y hace fallar el paso.
+      - name: Compilar, probar y verificar cobertura
+        run: ./mvnw --batch-mode --no-transfer-progress verify
+
+      # verify en verde no basta: con -DskipTests JaCoCo se salta su check y el build pasa igual.
+      - name: Verificar que las pruebas y la cobertura realmente se ejecutaron
+        run: bash scripts/ci/verificar-evidencia.sh
+
+      - name: Publicar reporte de cobertura
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reporte-cobertura
+          path: target/site/jacoco/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publicar reporte de pruebas
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reporte-pruebas
+          path: target/surefire-reports/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # El jar que acaba de pasar verify es EL artefacto: se publica con su SHA-256 y es el que va a la imagen.
+      - name: Preparar el jar probado
+        id: artefacto
+        run: |
+          mkdir artefacto
+          cp target/transferencia-api-*.jar artefacto/aplicacion.jar
+          sha=$(sha256sum artefacto/aplicacion.jar | cut -d' ' -f1)
+          echo "$sha  aplicacion.jar" > artefacto/aplicacion.jar.sha256
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "Jar probado: \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar el jar probado
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: jar-probado
+          path: artefacto/
+          if-no-files-found: error
+          retention-days: 30
+
+  imagen:
+    name: Imagen Docker con el jar probado
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Obtener el código (Dockerfile y scripts)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Descargar el jar probado
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: jar-probado
+          path: artefacto
+
+      # Doble control: el SHA del archivo descargado debe ser el que calculó el job build.
+      - name: Verificar que es el mismo jar
+        env:
+          SHA_ESPERADO: ${{ needs.build.outputs.jar-sha256 }}
+        run: echo "$SHA_ESPERADO  artefacto/aplicacion.jar" | sha256sum --check --strict
+
+      # --build-context jar=artefacto reemplaza la etapa "jar" del Dockerfile: la etapa de compilación
+      # no se ejecuta. JAR_SHA256 hace que el propio build verifique de nuevo el jar.
+      - name: Construir la imagen (sin recompilar)
+        env:
+          SHA_JAR: ${{ needs.build.outputs.jar-sha256 }}
+        run: |
+          docker build \
+            --build-context jar=artefacto \
+            --build-arg JAR_SHA256="$SHA_JAR" \
+            --build-arg VERSION="ci-${GITHUB_SHA::12}" \
+            --build-arg REVISION="$GITHUB_SHA" \
+            --tag transferencia-api:ci .
+          docker image inspect transferencia-api:ci --format '{{json .Config.Labels}}'
+
+      - name: Prueba de humo (arranca con PostgreSQL y responde health UP)
+        run: bash scripts/ci/smoke-imagen.sh transferencia-api:ci
+
+      - name: Publicar log de la prueba de humo
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: log-smoke
+          path: smoke-api.log
+          retention-days: 7

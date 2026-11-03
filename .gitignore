@@ -31,3 +31,6 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Logs locales de scripts/ci ###
+smoke-api.log
