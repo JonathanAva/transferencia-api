@@ -48,6 +48,58 @@ El core simulado ([`wiremock/mappings`](wiremock/mappings)) decide la respuesta 
 Las credenciales de `docker-compose.yml` son falsas y solo sirven en local; los puertos se publican en
 `127.0.0.1`. Si las credenciales del core no coinciden, el simulador responde `401` (la API lo traduce a `502`).
 
+## Integración continua
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) corre en cada push a `main` y en cada pull request:
+
+```mermaid
+flowchart LR
+    A[push / PR] --> C[contrato<br/>Redocly lint]
+    A --> B[build<br/>mvnw verify<br/>JDK 21 Temurin]
+    B --> E{¿jacoco.xml existe<br/>y pruebas > 0?}
+    E -- no --> X[falla]
+    E -- sí --> R[artefactos:<br/>cobertura, pruebas,<br/>jar probado + SHA-256]
+    R --> I[imagen<br/>docker build con<br/>EL MISMO jar]
+    I --> S[prueba de humo<br/>PostgreSQL + health UP]
+```
+
+| Job | Qué hace | Falla si… |
+|---|---|---|
+| `contrato` | `redocly lint` del contrato OpenAPI | el contrato tiene errores o advertencias |
+| `build` | `mvnw verify`: pruebas (Testcontainers) + gate JaCoCo ≥ 80 % de líneas | una prueba falla o la cobertura baja de 80 % |
+| | [`verificar-evidencia.sh`](scripts/ci/verificar-evidencia.sh) | no existe `jacoco.xml` o se ejecutaron 0 pruebas (p. ej. con `-DskipTests`) |
+| | Publica `reporte-cobertura`, `reporte-pruebas` y `jar-probado` (jar + SHA-256) | — |
+| `imagen` | Descarga `jar-probado`, verifica el SHA-256 y construye la imagen **sin recompilar** | el jar no es el que pasó `verify` |
+| | [`smoke-imagen.sh`](scripts/ci/smoke-imagen.sh): arranca la imagen con PostgreSQL | no corre como UID 10001 o `/actuator/health` no responde `UP` |
+
+**Build once.** El jar que pasa `verify` es el que entra en la imagen: el job `imagen` lo pasa al Dockerfile
+con `--build-context jar=artefacto`, que reemplaza la etapa `jar` del Dockerfile, así que la etapa de
+compilación no se ejecuta. El build vuelve a comprobar el SHA-256 (`JAR_SHA256`) y lo deja como etiqueta
+`com.izalco.jar.sha256` en la imagen, junto con el commit (`org.opencontainers.image.revision`).
+
+**Seguridad del workflow.**
+- Actions fijadas por **SHA completo** del commit (con la versión en un comentario).
+- `permissions: contents: read`.
+- `checkout` con `persist-credentials: false`.
+- Runner `ubuntu-24.04` fijo.
+
+### Protección de `main`
+
+La protección de ramas exige un repositorio público en el plan gratuito. Configuración (ruleset):
+
+1. *Settings → Rules → Rulesets → New ruleset → New branch ruleset*.
+2. Nombre `proteger-main`, *Enforcement status*: **Active**, *Bypass list*: **vacía**.
+3. *Target branches → Add target → Include default branch*.
+4. Reglas:
+   - **Restrict deletions** y **Block force pushes**.
+   - **Require a pull request before merging**.
+   - **Require status checks to pass**, con *Require branches to be up to date before merging*. Agregar los tres checks:
+     - `Lint del contrato OpenAPI`
+     - `Build, pruebas y cobertura`
+     - `Imagen Docker con el jar probado`
+
+Con esto nadie puede llevar a `main` un cambio que no haya pasado el CI, ni siquiera el administrador. La bypass list está vacía.
+
 ## Configuración por ambiente
 
 Un solo artefacto para todos los ambientes; lo que cambia se elige con `SPRING_PROFILES_ACTIVE`
@@ -177,3 +229,12 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
     y referencia del core. No se registra el concepto (texto libre, puede contener datos personales).
 26. **Imagen:** `eclipse-temurin` con versión fija (`21.0.13_9-jre-noble`), usuario UID 10001. Las pruebas no
     corren dentro de `docker build` (necesitan Docker); el pipeline ejecuta `verify` antes de construirla.
+27. **Un solo Dockerfile para local y pipeline:** en local compila solo (cómodo); en el pipeline recibe el jar
+    probado con `--build-context`. Se descartó un segundo Dockerfile "solo CI" porque dos archivos que
+    deben producir la misma imagen terminan divergiendo.
+28. **El CI no publica la imagen:** la construye y la prueba en cada push/PR, pero solo el workflow de
+    release (Fase 7, al crear un tag `vX.Y.Z`) la publica en GHCR. Así el registro solo contiene versiones
+    de release, nunca imágenes de ramas.
+29. **Pruebas mínimas:** el paso de evidencia exige más de 0 pruebas, no un número fijo. Un mínimo fijo
+    obligaría a cambiar el workflow cada vez que se agregan pruebas; borrar pruebas en masa ya lo detecta
+    el gate de cobertura.
