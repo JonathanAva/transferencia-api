@@ -492,6 +492,18 @@ class RegistroTransferenciaTest {
         }
 
         @Test
+        void contentTypeQueNoEsJsonDevuelve415ConCodigoYCorrelationId() throws Exception {
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/transferencias")
+                            .header("X-Idempotency-Key", UUID.randomUUID().toString())
+                            .contentType(MediaType.TEXT_PLAIN).content(CUERPO))
+                    .andExpect(status().isUnsupportedMediaType())
+                    .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.codigo").value("SOLICITUD_INVALIDA"))
+                    .andExpect(jsonPath("$.correlationId").exists());
+            assertThat(llamadasAlCore()).isZero();
+        }
+
+        @Test
         void jsonMalFormadoDevuelve400() throws Exception {
             enviar(UUID.randomUUID(), "{\"cuentaOrigen\": ")
                     .andExpect(status().isBadRequest())
