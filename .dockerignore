@@ -1,0 +1,19 @@
+# Solo se envía a "docker build" lo que la imagen necesita (mvnw, .mvn, pom.xml, src).
+# Menos contexto = build más rápido y sin riesgo de copiar archivos locales o secretos a la imagen.
+target/
+.git/
+.github/
+.idea/
+.vscode/
+*.iml
+defensa/
+docs/
+k8s/
+gateway/
+wiremock/
+*.md
+.env
+.env.*
+docker-compose*.yml
+Dockerfile
+.dockerignore
