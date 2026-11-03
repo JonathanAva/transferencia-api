@@ -1,3 +1,17 @@
 spring:
   application:
     name: transferencia-api
+
+# Core bancario legado.
+# URL y credenciales llegan SOLO por variables de entorno (en Kubernetes, desde un Secret).
+# El valor vacío después de ":" es intencional: si la variable no existe, la propiedad queda vacía,
+# la validación de CoreProperties falla y la aplicación NO arranca (fail fast).
+# Sin el ":" Spring dejaría el texto literal "${CORE_PASSWORD}", que pasaría la validación.
+core:
+  url: ${CORE_URL:}
+  usuario: ${CORE_USUARIO:}
+  password: ${CORE_PASSWORD:}
+  # Conexión: corto. Si vence, la solicitud no llegó al core y se puede reintentar.
+  timeout-conexion: ${CORE_TIMEOUT_CONEXION:2s}
+  # Lectura: mayor que el p95 real del core (en el incidente: p95 9.8 s contra un timeout de 5 s).
+  timeout-lectura: ${CORE_TIMEOUT_LECTURA:15s}

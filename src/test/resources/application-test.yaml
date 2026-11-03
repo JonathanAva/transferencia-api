@@ -1,0 +1,6 @@
+# Perfil "test": valores obviamente falsos para que el contexto de Spring arranque en las pruebas.
+# Las pruebas que llaman al core usan su propio WireMock y no dependen de estos valores.
+core:
+  url: http://localhost:9/core/transferencias
+  usuario: usuario-de-prueba
+  password: clave-falsa-solo-pruebas
