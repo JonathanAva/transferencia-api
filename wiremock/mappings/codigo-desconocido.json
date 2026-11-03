@@ -1,0 +1,15 @@
+{
+  "priority": 1,
+  "request": {
+    "method": "POST",
+    "url": "/core/transferencias",
+    "basicAuthCredentials": { "username": "usuario-local", "password": "clave-falsa-solo-local" },
+    "bodyPatterns": [ { "matchesXPath": "/TransferenciaRequest[Origen='990000002']" } ]
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/xml; charset=UTF-8" },
+    "body": "<TransferenciaResponse><Codigo>77</Codigo><Referencia>CORE-{{randomValue length=6 type='NUMERIC'}}</Referencia><Mensaje>CODIGO NO DOCUMENTADO</Mensaje></TransferenciaResponse>",
+    "transformers": ["response-template"]
+  }
+}

@@ -1,0 +1,68 @@
+# Ambiente local completo: PostgreSQL + core simulado (WireMock) + la API.
+#
+#   docker compose up --build -d
+#   docker compose logs -f api
+#   docker compose down -v        (-v borra también los datos de PostgreSQL)
+#
+# Todas las credenciales de este archivo son FALSAS y solo sirven en tu máquina.
+# Los puertos se publican solo en 127.0.0.1 (no quedan accesibles desde la red).
+#
+# El core simulado decide la respuesta según la cuenta ORIGEN (ver README, "Ejecutar en local"):
+#   510000000 → 51 saldo insuficiente     620000000 → 62 cuenta bloqueada
+#   910000000 → 91 core no disponible     990000001 → tarda 20 s (timeout de lectura → 504)
+#   990000002 → código desconocido (502)  990000003 → XML inválido (502)
+#   cualquier otra → 00 aprobada
+
+name: transferencia-api
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: transferencias
+      POSTGRES_USER: transferencias
+      POSTGRES_PASSWORD: clave-falsa-solo-local
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - datos-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transferencias -d transferencias"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  core-simulado:
+    image: wiremock/wiremock:3.13.2
+    volumes:
+      - ./wiremock:/home/wiremock:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    image: transferencia-api:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      core-simulado:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      DB_URL: jdbc:postgresql://postgres:5432/transferencias
+      DB_USUARIO: transferencias
+      DB_PASSWORD: clave-falsa-solo-local
+      CORE_URL: http://core-simulado:8080/core/transferencias
+      # Deben coincidir con basicAuthCredentials de wiremock/mappings (si no, el core simulado responde 401).
+      CORE_USUARIO: usuario-local
+      CORE_PASSWORD: clave-falsa-solo-local
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  datos-postgres:

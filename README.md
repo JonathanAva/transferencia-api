@@ -22,6 +22,62 @@ Validar el contrato:
 npx --yes @redocly/cli@2.64.1 lint
 ```
 
+## Ejecutar en local
+
+Requisitos: Docker Desktop y JDK 21.
+
+```powershell
+.\mvnw.cmd clean verify          # pruebas + gate de cobertura (usa Testcontainers: Docker encendido)
+docker compose up --build -d     # PostgreSQL + core simulado (WireMock) + API en http://localhost:8080
+.\scripts\probar-local.ps1       # recorre todos los escenarios del core
+docker compose down -v           # apaga todo y borra los datos
+```
+
+El core simulado ([`wiremock/mappings`](wiremock/mappings)) decide la respuesta según la **cuenta origen**:
+
+| Cuenta origen | Respuesta del core | Respuesta de la API |
+|---|---|---|
+| cualquier otra (p. ej. `100200300`) | `00` aprobada | `201` `APROBADA` |
+| `510000000` | `51` saldo insuficiente | `422` `SALDO_INSUFICIENTE` |
+| `620000000` | `62` cuenta bloqueada | `422` `CUENTA_BLOQUEADA` |
+| `910000000` | `91` no disponible | `503` `CORE_NO_DISPONIBLE` |
+| `990000001` | tarda 20 s (más que el timeout de lectura de 15 s) | `504` `CORE_TIMEOUT` |
+| `990000002` | código `77` no documentado | `502` `RESPUESTA_CORE_INVALIDA` |
+| `990000003` | cuerpo que no es XML | `502` `RESPUESTA_CORE_INVALIDA` |
+
+Las credenciales de `docker-compose.yml` son falsas y solo sirven en local; los puertos se publican en
+`127.0.0.1`. Si las credenciales del core no coinciden, el simulador responde `401` (la API lo traduce a `502`).
+
+## Configuración por ambiente
+
+Un solo artefacto para todos los ambientes; lo que cambia se elige con `SPRING_PROFILES_ACTIVE`
+(`dev`, `qa` o `prod`) y **las URLs y credenciales llegan solo por variables de entorno** (en Kubernetes,
+desde un `Secret`). Ningún archivo de configuración contiene URLs ni contraseñas, y una prueba lo verifica.
+
+| Variable | Obligatoria | Descripción |
+|---|---|---|
+| `SPRING_PROFILES_ACTIVE` | sí | `dev`, `qa` o `prod` (solo uno) |
+| `DB_URL`, `DB_USUARIO`, `DB_PASSWORD` | sí | Conexión a PostgreSQL |
+| `CORE_URL`, `CORE_USUARIO`, `CORE_PASSWORD` | sí | Endpoint y usuario de servicio del core |
+| `CORE_TIMEOUT_CONEXION` | no (2 s) | Timeout para conectar con el core |
+| `CORE_TIMEOUT_LECTURA` | no (15 s) | Timeout para recibir la respuesta; debe superar el p95 real del core |
+| `IDEMPOTENCIA_EXPIRACION` | no (24 h) | Tiempo durante el cual se recuerda una llave |
+| `DB_POOL_MAXIMO` | no (5 / 10 / 20) | Conexiones del pool por réplica (dev / qa / prod) |
+
+**Fail fast:** si falta una variable obligatoria, la aplicación no arranca.
+**Guardia de prod:** con el perfil `prod`, la aplicación no arranca si `CORE_URL` o `DB_URL` contienen
+`dev`, `qa`, `test`, `uat`, `staging`… (palabra completa), ni si hay dos perfiles de ambiente activos.
+Corre antes de crear cualquier bean, así que Flyway nunca llega a conectarse a la base equivocada.
+
+| | dev | qa | prod |
+|---|---|---|---|
+| Logs | texto, `DEBUG` para `com.izalco` | JSON (ECS), `INFO` | JSON (ECS), `INFO` |
+| Pool de conexiones | 5 | 10 | 20 |
+
+Todos los logs llevan el `correlationId` y los números de cuenta enmascarados (`*****0300`); el concepto no
+se registra. Actuator expone solo `/actuator/health` (con `liveness` y `readiness`) e `/actuator/info`
+(ambiente y versión del artefacto).
+
 ## Cadena de timeouts
 
 Cada eslabón debe esperar **más** que el siguiente. Si no, alguien se rinde mientras el de atrás
@@ -112,3 +168,12 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
 21. **Errores de Spring no listados en el contrato** (ruta inexistente, 405, 415): Problem Details con
     `codigo` `SOLICITUD_INVALIDA` y su status real.
 22. **`Location`:** ruta relativa (`/transferencias/{id}`), válida según RFC 9110 y correcta detrás del gateway.
+23. **Perfil sin ambiente:** sin `SPRING_PROFILES_ACTIVE` la aplicación arranca con la configuración común
+    (útil en local). Los manifiestos de cada ambiente siempre fijan el perfil.
+24. **Guardia de prod por palabras completas:** se busca `qa`, `dev`, etc. como palabra separada en la URL, no
+    como subcadena, para no rechazar hosts legítimos como `devoluciones.izalco.com`. No reemplaza la
+    validación de configuración del pipeline (Fase 7); es la última barrera dentro de la aplicación.
+25. **Datos que se registran en logs:** id, estado, cuentas enmascaradas (últimos 4 dígitos), banco, monto
+    y referencia del core. No se registra el concepto (texto libre, puede contener datos personales).
+26. **Imagen:** `eclipse-temurin` con versión fija (`21.0.13_9-jre-noble`), usuario UID 10001. Las pruebas no
+    corren dentro de `docker build` (necesitan Docker); el pipeline ejecuta `verify` antes de construirla.

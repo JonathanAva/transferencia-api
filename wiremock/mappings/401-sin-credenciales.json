@@ -1,0 +1,11 @@
+{
+  "priority": 10,
+  "request": {
+    "method": "POST",
+    "url": "/core/transferencias"
+  },
+  "response": {
+    "status": 401,
+    "headers": { "WWW-Authenticate": "Basic realm=\"core-simulado\"" }
+  }
+}

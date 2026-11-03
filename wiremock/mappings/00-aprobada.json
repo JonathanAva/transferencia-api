@@ -1,0 +1,14 @@
+{
+  "priority": 5,
+  "request": {
+    "method": "POST",
+    "url": "/core/transferencias",
+    "basicAuthCredentials": { "username": "usuario-local", "password": "clave-falsa-solo-local" }
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/xml; charset=UTF-8" },
+    "body": "<TransferenciaResponse><Codigo>00</Codigo><Referencia>CORE-{{randomValue length=6 type='NUMERIC'}}</Referencia><Mensaje>APROBADA</Mensaje></TransferenciaResponse>",
+    "transformers": ["response-template"]
+  }
+}
