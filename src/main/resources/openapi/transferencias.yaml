@@ -1,0 +1,723 @@
+openapi: 3.1.0
+
+info:
+  title: API de Transferencias Interbancarias
+  version: 1.0.0
+  summary: Registro y consulta de transferencias interbancarias de Banco Izalco Digital.
+  description: |
+    API que usa la app móvil de **Banco Izalco Digital** para registrar y consultar
+    transferencias interbancarias. La API transforma cada solicitud al formato XML
+    del core bancario legado y traduce sus códigos de respuesta a errores de negocio.
+
+    ## Idempotencia
+    Todo `POST /transferencias` exige el header `X-Idempotency-Key` (UUID generado por la app,
+    uno por cada intento *lógico* de transferencia):
+
+    | Situación | Respuesta |
+    |---|---|
+    | Llave nueva | Se procesa la transferencia normalmente. |
+    | Misma llave y mismo cuerpo, ya terminada | Se devuelve **la misma respuesta y el mismo status** que la primera vez, con el header `Idempotent-Replayed: true`. **No se vuelve a llamar al core.** |
+    | Misma llave y cuerpo distinto | `422 IDEMPOTENCY_KEY_REUTILIZADA` |
+    | Misma llave, la primera solicitud aún se está procesando | `409 SOLICITUD_EN_PROCESO` |
+
+    Las llaves expiran a las 24 horas (configurable).
+
+    Solo se guardan para *replay* los resultados **definitivos o inciertos** (201, 422, 502, 504).
+    Cuando el core responde que no está disponible o no se pudo conectar (`503`), la transferencia
+    **no se procesó con certeza**, así que la llave se libera y la app puede reintentar con la misma llave.
+
+    ## Timeouts del core
+    Si el core no responde a tiempo (`504 CORE_TIMEOUT`), el resultado es **desconocido**: el core
+    pudo haber registrado la transferencia. Por eso la API **no reintenta** automáticamente, guarda la
+    transferencia con estado `PENDIENTE_CONFIRMACION` y la app debe reintentar **con la misma llave**
+    (recibirá la respuesta guardada) o consultar `GET /transferencias/{id}`.
+
+    ## Errores
+    Todos los errores de la API usan **Problem Details (RFC 9457)** con media type
+    `application/problem+json` y los campos de extensión `codigo` (código de negocio estable,
+    pensado para que la app decida qué hacer) y `correlationId`.
+
+    Los errores `401` y `429` los emite el **API Gateway** (Kong) antes de llegar a la API.
+
+    ## Trazabilidad
+    El header opcional `X-Correlation-Id` se propaga a los logs. Si no se envía, la API genera uno.
+    Siempre se devuelve en la respuesta.
+  contact:
+    name: Equipo de Plataforma — Banco Izalco Digital
+    email: plataforma@izalco-digital.example
+  license:
+    name: Uso interno
+    identifier: LicenseRef-Interno
+
+servers:
+  - url: http://localhost:8000
+    description: Local a través de Kong (políticas de API activas)
+  - url: http://localhost:8080
+    description: Local directo a la API (sin gateway)
+  - url: https://api-dev.izalco-digital.example
+    description: Desarrollo
+  - url: https://api-qa.izalco-digital.example
+    description: QA
+  - url: https://api.izalco-digital.example
+    description: Producción
+
+security:
+  - clientId: []
+
+tags:
+  - name: Transferencias
+    description: Registro y consulta de transferencias interbancarias.
+
+paths:
+  /transferencias:
+    post:
+      tags: [Transferencias]
+      operationId: registrarTransferencia
+      summary: Registrar una transferencia interbancaria
+      description: |
+        Valida la solicitud, la envía al core bancario y devuelve el resultado.
+
+        Las transferencias **rechazadas** por el core (saldo insuficiente, cuenta bloqueada) también
+        se guardan con estado `RECHAZADA`, y su `transferenciaId` viene en el Problem Details para
+        poder consultarlas después.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SolicitudTransferencia'
+            examples:
+              pagoAlquiler:
+                summary: Pago de alquiler
+                value:
+                  cuentaOrigen: '100200300'
+                  cuentaDestino: '900800700'
+                  bancoDestino: BIZ-0042
+                  monto: 150.75
+                  moneda: USD
+                  concepto: Pago de alquiler
+                  fechaSolicitud: '2026-10-01T14:32:10-06:00'
+      responses:
+        '201':
+          description: Transferencia aprobada por el core.
+          headers:
+            Location:
+              description: URL para consultar la transferencia creada.
+              schema:
+                type: string
+                format: uri-reference
+                example: /transferencias/3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultadoTransferencia'
+              examples:
+                aprobada:
+                  summary: Aprobada (código core 00)
+                  value:
+                    id: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+                    estado: APROBADA
+                    referenciaCore: CORE-123456
+                    mensaje: Transferencia aprobada
+                    fechaRegistro: '2026-10-01T20:32:11Z'
+        '400':
+          description: |
+            Solicitud inválida (`SOLICITUD_INVALIDA`) o falta / es inválido el header
+            `X-Idempotency-Key` (`IDEMPOTENCY_KEY_REQUERIDA`).
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorValidacion'
+              examples:
+                solicitudInvalida:
+                  summary: Campos inválidos
+                  value:
+                    type: https://api.izalco-digital.example/problemas/solicitud-invalida
+                    title: Solicitud inválida
+                    status: 400
+                    detail: La solicitud tiene 2 campos inválidos.
+                    instance: /transferencias
+                    codigo: SOLICITUD_INVALIDA
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+                    errores:
+                      - campo: monto
+                        mensaje: debe ser mayor que 0 y tener máximo 2 decimales
+                      - campo: cuentaOrigen
+                        mensaje: debe contener solo dígitos (6 a 20)
+                idempotencyKeyRequerida:
+                  summary: Falta X-Idempotency-Key
+                  value:
+                    type: https://api.izalco-digital.example/problemas/idempotency-key-requerida
+                    title: Llave de idempotencia requerida
+                    status: 400
+                    detail: El header X-Idempotency-Key es obligatorio y debe ser un UUID.
+                    instance: /transferencias
+                    codigo: IDEMPOTENCY_KEY_REQUERIDA
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+        '401':
+          $ref: '#/components/responses/NoAutorizadoGateway'
+        '409':
+          description: Ya hay una solicitud en proceso con la misma `X-Idempotency-Key`.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                enProceso:
+                  value:
+                    type: https://api.izalco-digital.example/problemas/solicitud-en-proceso
+                    title: Solicitud en proceso
+                    status: 409
+                    detail: Ya existe una solicitud en proceso con esta llave de idempotencia. Reintente en unos segundos.
+                    instance: /transferencias
+                    codigo: SOLICITUD_EN_PROCESO
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+        '422':
+          description: |
+            Rechazo de negocio del core (`SALDO_INSUFICIENTE`, `CUENTA_BLOQUEADA`) o llave de
+            idempotencia reutilizada con otro cuerpo (`IDEMPOTENCY_KEY_REUTILIZADA`).
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorTransferencia'
+              examples:
+                saldoInsuficiente:
+                  summary: Saldo insuficiente (código core 51)
+                  value:
+                    type: https://api.izalco-digital.example/problemas/saldo-insuficiente
+                    title: Saldo insuficiente
+                    status: 422
+                    detail: La cuenta origen no tiene saldo suficiente para realizar la transferencia.
+                    instance: /transferencias
+                    codigo: SALDO_INSUFICIENTE
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+                    transferenciaId: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+                cuentaBloqueada:
+                  summary: Cuenta bloqueada (código core 62)
+                  value:
+                    type: https://api.izalco-digital.example/problemas/cuenta-bloqueada
+                    title: Cuenta bloqueada
+                    status: 422
+                    detail: La cuenta origen está bloqueada. Contacte a su agencia.
+                    instance: /transferencias
+                    codigo: CUENTA_BLOQUEADA
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+                    transferenciaId: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+                llaveReutilizada:
+                  summary: Misma llave con otro cuerpo
+                  value:
+                    type: https://api.izalco-digital.example/problemas/idempotency-key-reutilizada
+                    title: Llave de idempotencia reutilizada
+                    status: 422
+                    detail: La llave de idempotencia ya se usó con una solicitud diferente.
+                    instance: /transferencias
+                    codigo: IDEMPOTENCY_KEY_REUTILIZADA
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+        '429':
+          $ref: '#/components/responses/LimiteExcedidoGateway'
+        '500':
+          $ref: '#/components/responses/ErrorInterno'
+        '502':
+          description: |
+            El core respondió con un código desconocido o un formato inválido
+            (`RESPUESTA_CORE_INVALIDA`). El resultado en el core es incierto: la transferencia se guarda
+            como `PENDIENTE_CONFIRMACION`.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorTransferencia'
+              examples:
+                respuestaInvalida:
+                  value:
+                    type: https://api.izalco-digital.example/problemas/respuesta-core-invalida
+                    title: Respuesta inválida del core
+                    status: 502
+                    detail: El core bancario devolvió una respuesta no reconocida. La transferencia queda pendiente de confirmación.
+                    instance: /transferencias
+                    codigo: RESPUESTA_CORE_INVALIDA
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+                    transferenciaId: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+        '503':
+          description: |
+            El core no está disponible: respondió código 91 o rechazó la conexión
+            (`CORE_NO_DISPONIBLE`). La transferencia **no** se procesó; se puede reintentar con la
+            misma `X-Idempotency-Key`.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            Retry-After:
+              description: Segundos sugeridos antes de reintentar.
+              schema:
+                type: integer
+                minimum: 1
+                example: 30
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                coreNoDisponible:
+                  value:
+                    type: https://api.izalco-digital.example/problemas/core-no-disponible
+                    title: Core no disponible
+                    status: 503
+                    detail: El sistema central no está disponible en este momento. Intente más tarde.
+                    instance: /transferencias
+                    codigo: CORE_NO_DISPONIBLE
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+        '504':
+          description: |
+            El core no respondió dentro del tiempo configurado (`CORE_TIMEOUT`). El resultado es
+            **desconocido**: la transferencia se guarda como `PENDIENTE_CONFIRMACION`. Reintente con la
+            **misma** `X-Idempotency-Key` o consulte la transferencia; nunca con una llave nueva.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorTransferencia'
+              examples:
+                coreTimeout:
+                  value:
+                    type: https://api.izalco-digital.example/problemas/core-timeout
+                    title: Tiempo de espera del core agotado
+                    status: 504
+                    detail: El sistema central no respondió a tiempo. La transferencia queda pendiente de confirmación.
+                    instance: /transferencias
+                    codigo: CORE_TIMEOUT
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+                    transferenciaId: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+
+  /transferencias/{id}:
+    get:
+      tags: [Transferencias]
+      operationId: consultarTransferencia
+      summary: Consultar una transferencia
+      description: Devuelve una transferencia registrada, en cualquier estado.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Identificador de la transferencia (devuelto al registrarla).
+          schema:
+            type: string
+            format: uuid
+          example: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Transferencia encontrada.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transferencia'
+              examples:
+                aprobada:
+                  summary: Transferencia aprobada
+                  value:
+                    id: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+                    estado: APROBADA
+                    referenciaCore: CORE-123456
+                    mensaje: Transferencia aprobada
+                    fechaRegistro: '2026-10-01T20:32:11Z'
+                    cuentaOrigen: '100200300'
+                    cuentaDestino: '900800700'
+                    bancoDestino: BIZ-0042
+                    monto: 150.75
+                    moneda: USD
+                    concepto: Pago de alquiler
+                    fechaSolicitud: '2026-10-01T14:32:10-06:00'
+                pendiente:
+                  summary: Pendiente de confirmación (timeout del core)
+                  value:
+                    id: 8a2b4c6d-1e3f-4a5b-9c7d-0e1f2a3b4c5d
+                    estado: PENDIENTE_CONFIRMACION
+                    referenciaCore: null
+                    mensaje: El core no respondió a tiempo; la transferencia está pendiente de confirmación
+                    fechaRegistro: '2026-10-01T20:32:16Z'
+                    cuentaOrigen: '100200300'
+                    cuentaDestino: '900800700'
+                    bancoDestino: BIZ-0042
+                    monto: 150.75
+                    moneda: USD
+                    concepto: Pago de alquiler
+                    fechaSolicitud: '2026-10-01T14:32:10-06:00'
+        '400':
+          description: El `id` no es un UUID válido (`SOLICITUD_INVALIDA`).
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ErrorValidacion'
+              examples:
+                idInvalido:
+                  value:
+                    type: https://api.izalco-digital.example/problemas/solicitud-invalida
+                    title: Solicitud inválida
+                    status: 400
+                    detail: El identificador de la transferencia debe ser un UUID.
+                    instance: /transferencias/abc
+                    codigo: SOLICITUD_INVALIDA
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+                    errores:
+                      - campo: id
+                        mensaje: debe ser un UUID válido
+        '401':
+          $ref: '#/components/responses/NoAutorizadoGateway'
+        '404':
+          description: No existe una transferencia con ese `id` (`TRANSFERENCIA_NO_ENCONTRADA`).
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                noEncontrada:
+                  value:
+                    type: https://api.izalco-digital.example/problemas/transferencia-no-encontrada
+                    title: Transferencia no encontrada
+                    status: 404
+                    detail: No existe una transferencia con id 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33.
+                    instance: /transferencias/3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+                    codigo: TRANSFERENCIA_NO_ENCONTRADA
+                    correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+        '429':
+          $ref: '#/components/responses/LimiteExcedidoGateway'
+        '500':
+          $ref: '#/components/responses/ErrorInterno'
+
+components:
+  securitySchemes:
+    clientId:
+      type: apiKey
+      in: header
+      name: client_id
+      description: |
+        Identificador del cliente consumidor (Client ID Enforcement). Lo valida el API Gateway
+        (Kong, plugin `key-auth`); la API no lo recibe ni lo procesa.
+
+  parameters:
+    IdempotencyKey:
+      name: X-Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Llave única por intento lógico de transferencia, generada por la app (UUID).
+        Debe reutilizarse **sin cambios** en cada reintento de la misma transferencia.
+      schema:
+        type: string
+        format: uuid
+      example: 5d0c7f3e-2a91-4b6e-8f14-9c3a7e2d1b80
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: |
+        Identificador para rastrear la solicitud en los logs de todos los sistemas.
+        Si no se envía, la API genera uno. Solo letras, dígitos, `.`, `_` y `-` (máx. 64).
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,64}$'
+      example: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+
+  headers:
+    CorrelationId:
+      description: Identificador de correlación recibido o generado por la API.
+      schema:
+        type: string
+      example: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+    IdempotentReplayed:
+      description: |
+        Presente con valor `true` cuando la respuesta es una repetición de una respuesta guardada
+        (misma `X-Idempotency-Key` y mismo cuerpo). En ese caso **no** se llamó al core.
+      schema:
+        type: string
+        enum: ['true']
+
+  responses:
+    NoAutorizadoGateway:
+      description: Falta el header `client_id` o no es válido. Lo emite el API Gateway.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorGateway'
+          examples:
+            sinClientId:
+              value:
+                message: No API key found in request
+    LimiteExcedidoGateway:
+      description: Se superó el límite de solicitudes del cliente. Lo emite el API Gateway.
+      headers:
+        Retry-After:
+          description: Segundos que debe esperar el cliente antes de reintentar.
+          schema:
+            type: integer
+            example: 60
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorGateway'
+          examples:
+            limite:
+              value:
+                message: API rate limit exceeded
+    ErrorInterno:
+      description: Error inesperado en la API (`ERROR_INTERNO`). No expone detalles técnicos.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            interno:
+              value:
+                type: https://api.izalco-digital.example/problemas/error-interno
+                title: Error interno
+                status: 500
+                detail: Ocurrió un error inesperado. Reporte el correlationId a soporte.
+                instance: /transferencias
+                codigo: ERROR_INTERNO
+                correlationId: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+
+  schemas:
+    SolicitudTransferencia:
+      type: object
+      description: Solicitud de transferencia enviada por la app móvil.
+      additionalProperties: false
+      required: [cuentaOrigen, cuentaDestino, bancoDestino, monto, moneda, concepto, fechaSolicitud]
+      properties:
+        cuentaOrigen:
+          type: string
+          description: Número de cuenta origen. Solo dígitos.
+          pattern: '^[0-9]{6,20}$'
+          example: '100200300'
+        cuentaDestino:
+          type: string
+          description: Número de cuenta destino. Solo dígitos. Debe ser distinta de la cuenta origen.
+          pattern: '^[0-9]{6,20}$'
+          example: '900800700'
+        bancoDestino:
+          type: string
+          description: Código del banco destino (3 letras mayúsculas, guion y 4 dígitos).
+          pattern: '^[A-Z]{3}-[0-9]{4}$'
+          example: BIZ-0042
+        monto:
+          type: number
+          description: |
+            Importe a transferir. Mayor que 0, máximo 2 decimales y 13 dígitos enteros.
+            Internamente se maneja como `BigDecimal` (nunca punto flotante).
+          exclusiveMinimum: 0
+          maximum: 9999999999999.99
+          example: 150.75
+        moneda:
+          type: string
+          description: Código de moneda ISO 4217 (3 letras mayúsculas).
+          pattern: '^[A-Z]{3}$'
+          example: USD
+        concepto:
+          type: string
+          description: |
+            Descripción libre de la transferencia. Al enviarse al core se convierte a MAYÚSCULAS,
+            sin tildes ni caracteres no ASCII, y se trunca a 30 caracteres.
+          minLength: 1
+          maxLength: 140
+          example: Pago de alquiler
+        fechaSolicitud:
+          type: string
+          format: date-time
+          description: |
+            Fecha y hora de la solicitud en ISO 8601 **con zona horaria** (offset o `Z`).
+            Se convierte a UTC antes de enviarla al core.
+          example: '2026-10-01T14:32:10-06:00'
+
+    EstadoTransferencia:
+      type: string
+      description: |
+        - `APROBADA`: el core aprobó la transferencia (código 00).
+        - `RECHAZADA`: el core la rechazó por una regla de negocio (códigos 51 y 62).
+        - `PENDIENTE_CONFIRMACION`: el resultado en el core es desconocido (timeout o respuesta
+          inválida). Requiere conciliación.
+      enum: [APROBADA, RECHAZADA, PENDIENTE_CONFIRMACION]
+
+    ResultadoTransferencia:
+      type: object
+      description: Resultado de registrar una transferencia.
+      required: [id, estado, mensaje, fechaRegistro]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Identificador de la transferencia.
+          example: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+        estado:
+          $ref: '#/components/schemas/EstadoTransferencia'
+        referenciaCore:
+          type: [string, 'null']
+          description: Referencia asignada por el core. `null` si el core no la devolvió.
+          example: CORE-123456
+        mensaje:
+          type: string
+          description: Mensaje legible para el usuario.
+          example: Transferencia aprobada
+        fechaRegistro:
+          type: string
+          format: date-time
+          description: Momento en que la API registró la transferencia (UTC).
+          example: '2026-10-01T20:32:11Z'
+
+    Transferencia:
+      description: Transferencia registrada con todos sus datos.
+      allOf:
+        - $ref: '#/components/schemas/ResultadoTransferencia'
+        - type: object
+          required: [cuentaOrigen, cuentaDestino, bancoDestino, monto, moneda, concepto, fechaSolicitud]
+          properties:
+            cuentaOrigen:
+              type: string
+              example: '100200300'
+            cuentaDestino:
+              type: string
+              example: '900800700'
+            bancoDestino:
+              type: string
+              example: BIZ-0042
+            monto:
+              type: number
+              example: 150.75
+            moneda:
+              type: string
+              example: USD
+            concepto:
+              type: string
+              description: Concepto tal como lo envió la app (sin transformar).
+              example: Pago de alquiler
+            fechaSolicitud:
+              type: string
+              format: date-time
+              example: '2026-10-01T14:32:10-06:00'
+
+    Error:
+      type: object
+      description: Error en formato Problem Details (RFC 9457) con extensiones de negocio.
+      required: [type, title, status, detail, codigo, correlationId]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI que identifica el tipo de problema.
+          example: https://api.izalco-digital.example/problemas/core-no-disponible
+        title:
+          type: string
+          description: Resumen corto y estable del tipo de problema.
+          example: Core no disponible
+        status:
+          type: integer
+          description: Código HTTP de la respuesta.
+          example: 503
+        detail:
+          type: string
+          description: Explicación legible de esta ocurrencia concreta del problema.
+          example: El sistema central no está disponible en este momento. Intente más tarde.
+        instance:
+          type: string
+          format: uri-reference
+          description: Ruta de la solicitud que produjo el problema.
+          example: /transferencias
+        codigo:
+          $ref: '#/components/schemas/CodigoError'
+        correlationId:
+          type: string
+          description: Identificador de correlación para rastrear la solicitud en los logs.
+          example: 7b9e2f0a-4c1d-4e8b-a3f6-2d5c8e9b0a17
+
+    ErrorTransferencia:
+      description: Error asociado a una transferencia que quedó guardada y puede consultarse.
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          properties:
+            transferenciaId:
+              type: string
+              format: uuid
+              description: |
+                Identificador de la transferencia guardada (rechazada o pendiente). No viene cuando
+                el error es `IDEMPOTENCY_KEY_REUTILIZADA`.
+              example: 3f1c9a4e-8b2d-4c7a-9e51-0d6f2b7a1c33
+
+    ErrorValidacion:
+      description: Error de validación con el detalle de cada campo inválido.
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          properties:
+            errores:
+              type: array
+              description: Campos inválidos. No viene cuando el error es `IDEMPOTENCY_KEY_REQUERIDA`.
+              items:
+                type: object
+                required: [campo, mensaje]
+                properties:
+                  campo:
+                    type: string
+                    example: monto
+                  mensaje:
+                    type: string
+                    example: debe ser mayor que 0 y tener máximo 2 decimales
+
+    CodigoError:
+      type: string
+      description: Código de negocio estable. La app debe decidir su comportamiento con este campo, no con el texto.
+      enum:
+        - SOLICITUD_INVALIDA
+        - IDEMPOTENCY_KEY_REQUERIDA
+        - IDEMPOTENCY_KEY_REUTILIZADA
+        - SOLICITUD_EN_PROCESO
+        - TRANSFERENCIA_NO_ENCONTRADA
+        - SALDO_INSUFICIENTE
+        - CUENTA_BLOQUEADA
+        - CORE_NO_DISPONIBLE
+        - CORE_TIMEOUT
+        - RESPUESTA_CORE_INVALIDA
+        - ERROR_INTERNO
+
+    ErrorGateway:
+      type: object
+      description: Formato de error propio de Kong (no es Problem Details).
+      properties:
+        message:
+          type: string
