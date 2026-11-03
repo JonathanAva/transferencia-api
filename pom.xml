@@ -30,6 +30,8 @@
 		<java.version>21</java.version>
 		<!-- No administrada por Spring Boot. Última estable de 3.x (la línea 4.x sigue en beta). -->
 		<wiremock.version>3.13.2</wiremock.version>
+		<!-- No administrada por Spring Boot. 0.8.16 tiene menos de 2 semanas publicada; se usa la anterior estable. -->
+		<jacoco.version>0.8.15</jacoco.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -122,6 +124,59 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<!-- Cobertura de pruebas. El build FALLA en "verify" si la cobertura de líneas baja de 80 %.
+				     El umbral está fijo aquí a propósito (no es una propiedad que se pueda cambiar con -D):
+				     bajarlo exige modificar este archivo, y ese cambio queda en un commit revisable. -->
+				<groupId>org.jacoco</groupId>
+				<artifactId>jacoco-maven-plugin</artifactId>
+				<version>${jacoco.version}</version>
+				<configuration>
+					<excludes>
+						<!-- Solo el punto de entrada (main). Ningún código de negocio se excluye. -->
+						<exclude>com/izalco/transferencias/TransferenciaApiApplication.class</exclude>
+					</excludes>
+				</configuration>
+				<executions>
+					<execution>
+						<!-- Instrumenta la JVM de las pruebas para registrar qué líneas se ejecutan. -->
+						<id>preparar-agente</id>
+						<goals>
+							<goal>prepare-agent</goal>
+						</goals>
+					</execution>
+					<execution>
+						<!-- Reporte HTML/XML/CSV en target/site/jacoco (el CI lo publica como artefacto). -->
+						<id>reporte</id>
+						<phase>verify</phase>
+						<goals>
+							<goal>report</goal>
+						</goals>
+					</execution>
+					<execution>
+						<id>verificar-cobertura</id>
+						<phase>verify</phase>
+						<goals>
+							<goal>check</goal>
+						</goals>
+						<configuration>
+							<haltOnFailure>true</haltOnFailure>
+							<rules>
+								<rule>
+									<element>BUNDLE</element>
+									<limits>
+										<limit>
+											<counter>LINE</counter>
+											<value>COVEREDRATIO</value>
+											<minimum>0.80</minimum>
+										</limit>
+									</limits>
+								</rule>
+							</rules>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 	</build>
