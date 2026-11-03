@@ -165,8 +165,4 @@ public class TransferenciaEntidad implements Persistable<UUID> {
     public Instant getFechaRegistro() {
         return fechaRegistro;
     }
-
-    public Instant getFechaActualizacion() {
-        return fechaActualizacion;
-    }
 }
