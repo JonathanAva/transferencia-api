@@ -1,6 +1,14 @@
+# Configuración común a todos los ambientes. Lo que cambia por ambiente está en
+# application-dev.yaml, application-qa.yaml y application-prod.yaml (SPRING_PROFILES_ACTIVE).
+# Regla: aquí no hay URLs ni credenciales reales; llegan por variables de entorno.
 spring:
   application:
     name: transferencia-api
+  # Base de datos. Si falta DB_URL, la aplicación no arranca ("'url' attribute is not specified").
+  datasource:
+    url: ${DB_URL:}
+    username: ${DB_USUARIO:}
+    password: ${DB_PASSWORD:}
   jpa:
     # No mantener la sesión de base de datos abierta mientras se escribe la respuesta HTTP.
     open-in-view: false
@@ -23,6 +31,10 @@ management:
       # /actuator/health/liveness y /actuator/health/readiness para las sondas de Kubernetes.
       probes:
         enabled: true
+  # Permite publicar en /actuator/info las propiedades "info.*" (p. ej. el ambiente).
+  info:
+    env:
+      enabled: true
 
 # Core bancario legado.
 # URL y credenciales llegan SOLO por variables de entorno (en Kubernetes, desde un Secret).

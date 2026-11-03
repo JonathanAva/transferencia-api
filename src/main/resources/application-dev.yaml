@@ -1,0 +1,15 @@
+# Ambiente de desarrollo (SPRING_PROFILES_ACTIVE=dev). También es el perfil de docker-compose.
+# URLs y credenciales siguen llegando por variables de entorno, igual que en prod.
+
+info:
+  ambiente: dev
+
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAXIMO:5}
+
+logging:
+  level:
+    # Más detalle de nuestro código para depurar. Nunca en prod.
+    com.izalco.transferencias: DEBUG

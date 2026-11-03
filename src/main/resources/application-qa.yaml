@@ -1,0 +1,14 @@
+# Ambiente de QA (SPRING_PROFILES_ACTIVE=qa). Debe parecerse a prod para que las pruebas valgan,
+# pero con su propio core, su propia base y sus propias credenciales (nunca compartidas con prod).
+
+info:
+  ambiente: qa
+
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAXIMO:10}
+
+logging:
+  level:
+    com.izalco.transferencias: INFO

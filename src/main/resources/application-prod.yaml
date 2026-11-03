@@ -1,0 +1,21 @@
+# Ambiente de producción (SPRING_PROFILES_ACTIVE=prod).
+# Este archivo NO contiene URLs ni credenciales: todo llega por variables de entorno desde un Secret.
+# GuardiaAmbiente impide arrancar si core.url o spring.datasource.url apuntan a algo de dev/qa
+# (en el incidente, prod apuntaba a https://core-qa.izalco.local).
+
+info:
+  ambiente: prod
+
+spring:
+  datasource:
+    hikari:
+      # Con 2+ réplicas, el total de conexiones es réplicas x este valor: debe caber en el límite de PostgreSQL.
+      maximum-pool-size: ${DB_POOL_MAXIMO:20}
+
+core:
+  # Explícito en prod: debe revisarse contra el p95 real del core antes de cada cambio.
+  timeout-lectura: ${CORE_TIMEOUT_LECTURA:15s}
+
+logging:
+  level:
+    com.izalco.transferencias: INFO
