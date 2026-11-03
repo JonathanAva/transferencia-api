@@ -46,3 +46,19 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
    legible, más las extensiones `codigo` y `correlationId`.
 9. **Client ID y rate limiting:** los aplica el API Gateway (Kong); los errores `401` y `429` tienen
    el formato propio de Kong.
+10. **Dos timeouts distintos hacia el core:**
+    - *Conexión* (`CORE_TIMEOUT_CONEXION`, por defecto 2 s): si vence, o si la conexión es rechazada,
+      la solicitud nunca llegó al core → `503 CORE_NO_DISPONIBLE` y la llave se libera.
+    - *Lectura* (`CORE_TIMEOUT_LECTURA`, por defecto 15 s): si vence, el core recibió la solicitud y
+      pudo procesarla → `504 CORE_TIMEOUT`, `PENDIENTE_CONFIRMACION` y la llave **no** se libera.
+    - El de lectura debe ajustarse al p95 real del core de cada ambiente (en el incidente el p95 fue
+      9.8 s contra un timeout de 5 s). La aplicación no arranca si el de conexión no es menor que el de lectura.
+11. **Otras fallas con resultado incierto:** conexión cortada a mitad de la respuesta, status HTTP
+    distinto de 2xx, cuerpo vacío o XML inválido → `502 RESPUESTA_CORE_INVALIDA` y `PENDIENTE_CONFIRMACION`.
+    Ante la duda, se asume que el core pudo procesar la transferencia (nunca se arriesga un duplicado).
+12. **Sin reintentos automáticos hacia el core:** el core no es idempotente.
+13. **Autenticación con el core:** HTTP Basic con un usuario de servicio (`CORE_USUARIO` / `CORE_PASSWORD`),
+    sobre HTTP/1.1 y sin seguir redirecciones.
+14. **Glosa vacía:** si el concepto queda vacío tras quitar caracteres no ASCII (por ejemplo, solo
+    emojis), se envía la glosa `TRANSFERENCIA`.
+15. **Monto hacia el core:** siempre con 2 decimales (`100` → `100.00`).
