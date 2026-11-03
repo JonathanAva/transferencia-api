@@ -1,9 +1,18 @@
 # syntax=docker/dockerfile:1
 #
-# Imagen de transferencia-api. Tres etapas: solo la última llega a la imagen final.
-#   1. compilacion: JDK + Maven, compila el jar.
-#   2. capas:       separa el jar en capas (dependencias / aplicación).
-#   3. ejecucion:   solo JRE + las capas, usuario no root.
+# Imagen de transferencia-api. Solo la última etapa llega a la imagen final.
+#   1. compilacion: JDK + Maven, compila el jar.                 (solo en local)
+#   2. jar:         el jar que va a la imagen.
+#   3. capas:       separa el jar en capas (dependencias / aplicación) y verifica su SHA-256.
+#   4. ejecucion:   solo JRE + las capas, usuario no root.
+#
+# Dos formas de construirla, con el MISMO Dockerfile:
+#   Local:     docker build -t transferencia-api:local .
+#              → la etapa "jar" toma el jar que compila la etapa "compilacion".
+#   Pipeline:  docker build --build-context jar=artefacto --build-arg JAR_SHA256=<sha> .
+#              → "--build-context jar=..." REEMPLAZA la etapa "jar" por la carpeta "artefacto", que contiene
+#                el aplicacion.jar que ya pasó "mvnw verify". BuildKit solo construye las etapas que se usan,
+#                así que "compilacion" ni se ejecuta: no se recompila nada (build once).
 #
 # Las versiones de las imágenes base están fijadas (no "latest") para que el build sea reproducible.
 
@@ -18,21 +27,40 @@ COPY .mvn .mvn
 RUN ./mvnw --batch-mode --no-transfer-progress dependency:go-offline
 
 COPY src src
-# -DskipTests SOLO aquí, a propósito: las pruebas necesitan Docker (Testcontainers) y no pueden correr
-# dentro de "docker build". El pipeline ejecuta "mvnw verify" (pruebas + gate de cobertura) sobre el
-# mismo commit ANTES de construir esta imagen; si falla, la imagen nunca se construye.
+# -DskipTests SOLO aquí, y esta etapa solo se usa en local: las pruebas necesitan Docker (Testcontainers)
+# y no pueden correr dentro de "docker build". El pipeline no usa esta etapa: mete en la imagen el jar
+# que ya pasó "mvnw verify" (pruebas + gate de cobertura).
 RUN ./mvnw --batch-mode --no-transfer-progress package -DskipTests
 
-# ---------- 2. Capas ----------
+# ---------- 2. El jar que va a la imagen ----------
+# En el pipeline esta etapa se reemplaza con --build-context jar=<carpeta con aplicacion.jar>.
+FROM scratch AS jar
+COPY --from=compilacion /fuente/target/transferencia-api-*.jar /aplicacion.jar
+
+# ---------- 3. Capas ----------
 FROM eclipse-temurin:21.0.13_9-jre-noble AS capas
 WORKDIR /capas
-COPY --from=compilacion /fuente/target/transferencia-api-*.jar aplicacion.jar
+COPY --from=jar /aplicacion.jar aplicacion.jar
+# Si el pipeline pasa el SHA-256 del jar probado, se exige que sea exactamente ese jar.
+# Cualquier diferencia (otro jar, un jar recompilado, un archivo corrupto) detiene el build.
+ARG JAR_SHA256=""
+RUN if [ -n "$JAR_SHA256" ]; then echo "$JAR_SHA256  aplicacion.jar" | sha256sum --check --strict; fi
 # Spring Boot separa el jar en capas que cambian con distinta frecuencia: las dependencias casi nunca,
 # el código de la aplicación en cada versión. Así, al publicar una versión nueva solo viaja la capa pequeña.
 RUN java -Djarmode=tools -jar aplicacion.jar extract --layers --launcher --destination extraido
 
-# ---------- 3. Ejecución ----------
+# ---------- 4. Ejecución ----------
 FROM eclipse-temurin:21.0.13_9-jre-noble AS ejecucion
+
+# Trazabilidad (etiquetas OCI): de qué commit y de qué jar exacto salió esta imagen.
+ARG JAR_SHA256=""
+ARG VERSION="local"
+ARG REVISION="local"
+LABEL org.opencontainers.image.title="transferencia-api" \
+      org.opencontainers.image.source="https://github.com/JonathanAva/transferencia-api" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      com.izalco.jar.sha256="${JAR_SHA256}"
 
 # Usuario sin privilegios con UID numérico fijo: Kubernetes puede verificar "runAsNonRoot" con un número,
 # no con un nombre. Si alguien explota la aplicación, no es root dentro del contenedor.
