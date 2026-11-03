@@ -32,7 +32,7 @@ public interface IdempotenciaRepositorio extends JpaRepository<IdempotenciaEntid
 
     /** Guarda la respuesta definitiva, solo si la llave sigue EN_PROCESO (nadie la cerró antes). */
     @Transactional
-    @Modifying(clearAutomatically = true)
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""
             UPDATE IdempotenciaEntidad i
                SET i.estado = :completada, i.httpStatus = :httpStatus, i.respuesta = :respuesta
@@ -48,7 +48,7 @@ public interface IdempotenciaRepositorio extends JpaRepository<IdempotenciaEntid
 
     /** Libera la llave (el core NO procesó la solicitud), solo si sigue EN_PROCESO. */
     @Transactional
-    @Modifying(clearAutomatically = true)
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("DELETE FROM IdempotenciaEntidad i WHERE i.llave = :llave AND i.estado = :enProceso")
     int liberar(@Param("llave") UUID llave, @Param("enProceso") EstadoLlave enProceso);
 
@@ -58,7 +58,7 @@ public interface IdempotenciaRepositorio extends JpaRepository<IdempotenciaEntid
 
     /** Borra la llave solo si ya venció (pasadas las 24 h se puede reutilizar). */
     @Transactional
-    @Modifying(clearAutomatically = true)
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("DELETE FROM IdempotenciaEntidad i WHERE i.llave = :llave AND i.expiraEn < :ahora")
     int borrarSiVencio(@Param("llave") UUID llave, @Param("ahora") Instant ahora);
 }

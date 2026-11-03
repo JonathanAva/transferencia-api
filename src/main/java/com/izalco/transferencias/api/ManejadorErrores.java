@@ -1,6 +1,9 @@
 package com.izalco.transferencias.api;
 
+import com.izalco.transferencias.core.CoreNoDisponibleException;
 import com.izalco.transferencias.dominio.TransferenciaNoEncontradaException;
+import com.izalco.transferencias.idempotencia.LlaveReutilizadaException;
+import com.izalco.transferencias.idempotencia.SolicitudEnProcesoException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,12 +46,38 @@ public class ManejadorErrores extends ResponseEntityExceptionHandler {
 
     static final String HEADER_IDEMPOTENCIA = "X-Idempotency-Key";
 
+    /** Sugerencia a la app (header Retry-After) cuando el core no está disponible. */
+    static final int SEGUNDOS_REINTENTO = 30;
+
     // ---------- Errores de negocio ----------
 
     @ExceptionHandler(TransferenciaNoEncontradaException.class)
     ResponseEntity<ProblemDetail> noEncontrada(TransferenciaNoEncontradaException ex, HttpServletRequest req) {
         return responder(FabricaProblemas.crear(CodigoError.TRANSFERENCIA_NO_ENCONTRADA,
                 ex.getMessage() + ".", req.getRequestURI()));
+    }
+
+    @ExceptionHandler(LlaveReutilizadaException.class)
+    ResponseEntity<ProblemDetail> llaveReutilizada(LlaveReutilizadaException ex, HttpServletRequest req) {
+        return responder(FabricaProblemas.crear(CodigoError.IDEMPOTENCY_KEY_REUTILIZADA,
+                ex.getMessage(), req.getRequestURI()));
+    }
+
+    @ExceptionHandler(SolicitudEnProcesoException.class)
+    ResponseEntity<ProblemDetail> enProceso(SolicitudEnProcesoException ex, HttpServletRequest req) {
+        return responder(FabricaProblemas.crear(CodigoError.SOLICITUD_EN_PROCESO,
+                ex.getMessage(), req.getRequestURI()));
+    }
+
+    /** El core no procesó la transferencia: la app puede reintentar con la misma llave. */
+    @ExceptionHandler(CoreNoDisponibleException.class)
+    ResponseEntity<ProblemDetail> coreNoDisponible(CoreNoDisponibleException ex, HttpServletRequest req) {
+        log.warn("Core no disponible: {}", ex.getMessage());
+        ProblemDetail problema = FabricaProblemas.crear(CodigoError.CORE_NO_DISPONIBLE,
+                "El sistema central no está disponible en este momento. Intente más tarde.", req.getRequestURI());
+        return ResponseEntity.status(problema.getStatus())
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(SEGUNDOS_REINTENTO))
+                .body(problema);
     }
 
     /** Último recurso: nunca expone detalles técnicos al cliente, pero sí los deja en el log. */
@@ -167,12 +196,16 @@ public class ManejadorErrores extends ResponseEntityExceptionHandler {
 
     /** Nombre del campo JSON que causó el error de lectura, si Jackson lo informa. */
     private static String campoConError(HttpMessageNotReadableException ex) {
-        if (ex.getMostSpecificCause() instanceof DatabindException e && !e.getPath().isEmpty()) {
-            String campo = e.getPath().stream()
-                    .map(JacksonException.Reference::getPropertyName)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.joining("."));
-            return campo.isEmpty() ? null : campo;
+        // Se recorre la cadena de causas: la más profunda puede ser, p. ej., DateTimeParseException,
+        // pero la que conoce el nombre del campo es la DatabindException de Jackson que la envuelve.
+        for (Throwable causa = ex.getCause(); causa != null; causa = causa.getCause()) {
+            if (causa instanceof DatabindException e && !e.getPath().isEmpty()) {
+                String campo = e.getPath().stream()
+                        .map(JacksonException.Reference::getPropertyName)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.joining("."));
+                return campo.isEmpty() ? null : campo;
+            }
         }
         return null;
     }

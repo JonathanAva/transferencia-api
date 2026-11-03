@@ -22,3 +22,11 @@ core:
   timeout-conexion: ${CORE_TIMEOUT_CONEXION:2s}
   # Lectura: mayor que el p95 real del core (en el incidente: p95 9.8 s contra un timeout de 5 s).
   timeout-lectura: ${CORE_TIMEOUT_LECTURA:15s}
+
+# Llaves de idempotencia (header X-Idempotency-Key).
+idempotencia:
+  # Tiempo durante el cual se recuerda una llave (replay). Después puede reutilizarse.
+  expiracion: ${IDEMPOTENCIA_EXPIRACION:24h}
+  # Una llave EN_PROCESO por más de (core.timeout-lectura + este margen) quedó "atrapada"
+  # (p. ej. el pod murió a mitad de la llamada) y se cierra como resultado incierto, nunca se libera.
+  margen-en-proceso: ${IDEMPOTENCIA_MARGEN_EN_PROCESO:30s}
