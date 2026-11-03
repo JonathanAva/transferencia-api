@@ -64,7 +64,7 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
 1. **Formato de `X-Idempotency-Key`:** UUID generado por la app, uno por intento lógico de transferencia.
 2. **Validaciones de entrada:** cuentas de 6 a 20 dígitos y distintas entre sí; `bancoDestino` con
    formato `AAA-9999` (según el ejemplo `BIZ-0042`); `concepto` de 1 a 140 caracteres; monto mayor que 0,
-   máximo 2 decimales y 13 dígitos enteros; `fechaSolicitud` debe incluir zona horaria.
+   máximo 2 decimales significativos y 13 dígitos enteros (ver supuesto 16); `fechaSolicitud` debe incluir zona horaria.
 3. **Glosa del core:** si el concepto supera 30 caracteres se **trunca** (no se rechaza), se pasa a
    mayúsculas y se eliminan tildes y caracteres no ASCII.
 4. **Respuesta del core:** no está definida en el enunciado; se asume
@@ -97,8 +97,9 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
 14. **Glosa vacía:** si el concepto queda vacío tras quitar caracteres no ASCII (por ejemplo, solo
     emojis), se envía la glosa `TRANSFERENCIA`.
 15. **Monto hacia el core:** siempre con 2 decimales (`100` → `100.00`).
-16. **Monto con más de 2 decimales escritos:** `150.750` se rechaza (400) aunque valga lo mismo que
-    `150.75`; se aplica literalmente "máximo 2 decimales".
+16. **Decimales del monto:** se cuentan los decimales **significativos** (sin ceros a la derecha), porque
+    en JSON `150.750` y `150.75` son el mismo número: `150.750` se acepta y se guarda como `150.75`;
+    `150.755` se rechaza con 400. El contrato, la validación (`@MontoValido`) y las pruebas aplican la misma regla.
 17. **Huella de la solicitud (idempotencia):** SHA-256 del *contenido* interpretado, no del texto JSON. El
     orden de los campos, los espacios o el offset de la fecha (si es el mismo instante) no la cambian.
 18. **Llave atrapada:** una llave `EN_PROCESO` por más de *timeout de lectura + margen* (por defecto

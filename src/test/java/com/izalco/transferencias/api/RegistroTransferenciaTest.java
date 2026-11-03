@@ -239,7 +239,7 @@ class RegistroTransferenciaTest {
             enviar(llave, CUERPO).andExpect(status().isCreated());
 
             String mismoContenido = """
-                    {"fechaSolicitud":"2026-10-01T14:32:10-06:00","monto":150.75,"moneda":"USD",
+                    {"fechaSolicitud":"2026-10-01T14:32:10-06:00","monto":150.750,"moneda":"USD",
                      "concepto":"Pago de alquiler","bancoDestino":"BIZ-0042",
                      "cuentaDestino":"900800700","cuentaOrigen":"100200300"}""";
 
@@ -450,6 +450,30 @@ class RegistroTransferenciaTest {
                     .andExpect(jsonPath("$.errores[0].campo").value("moneda"))
                     .andExpect(jsonPath("$.errores[1].campo").value("monto"));
             assertThat(llamadasAlCore()).isZero();
+        }
+
+        @Test
+        void montoConTresDecimalesSignificativosDevuelve400() throws Exception {
+            enviar(UUID.randomUUID(), CUERPO.replace("150.75", "150.755"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.errores[0].campo").value("monto"))
+                    .andExpect(jsonPath("$.errores[0].mensaje").value("debe tener máximo 13 enteros y 2 decimales"));
+            assertThat(llamadasAlCore()).isZero();
+        }
+
+        @Test
+        void montoConCerosALaDerechaSeAceptaYSeGuardaNormalizado() throws Exception {
+            coreResponde("00");
+
+            MvcResult r = enviar(UUID.randomUUID(), CUERPO.replace("150.75", "150.750"))
+                    .andExpect(status().isCreated())
+                    .andReturn();
+
+            assertThat(transferencias.findById(transferenciaIdDe(r)).orElseThrow().getMonto())
+                    .isEqualByComparingTo("150.75");
+            core.verify(postRequestedFor(urlEqualTo(RUTA_CORE))
+                    .withRequestBody(com.github.tomakehurst.wiremock.client.WireMock.containing(
+                            "<Importe moneda=\"USD\">150.75</Importe>")));
         }
 
         @Test

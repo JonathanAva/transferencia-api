@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -48,6 +49,27 @@ class SolicitudTransferenciaTest {
     @Test
     void laSolicitudDelEnunciadoEsValida() {
         assertThat(validador.validate(valida())).isEmpty();
+    }
+
+    /** Ceros a la derecha no son decimales significativos: en JSON 150.750 y 150.75 son el mismo número. */
+    @ParameterizedTest(name = "monto {0} es válido")
+    @ValueSource(strings = {"150.75", "150.750", "150.7500", "150.7", "100", "100.00", "0.01", "9999999999999.99"})
+    void aceptaMontosConMaximoDosDecimalesSignificativos(String monto) {
+        assertThat(validador.validate(conMonto(monto))).isEmpty();
+    }
+
+    @ParameterizedTest(name = "monto {0} es inválido")
+    @ValueSource(strings = {"150.755", "150.7501", "0.001", "10000000000000", "10000000000000.00"})
+    void rechazaMontosConMasDeDosDecimalesSignificativosOMasDe13Enteros(String monto) {
+        assertThat(validador.validate(conMonto(monto)))
+                .extracting(e -> e.getPropertyPath().toString())
+                .containsOnly("monto");
+    }
+
+    private static SolicitudTransferencia conMonto(String monto) {
+        SolicitudTransferencia v = valida();
+        return new SolicitudTransferencia(v.cuentaOrigen(), v.cuentaDestino(), v.bancoDestino(),
+                new BigDecimal(monto), v.moneda(), v.concepto(), v.fechaSolicitud());
     }
 
     @ParameterizedTest(name = "{0}")

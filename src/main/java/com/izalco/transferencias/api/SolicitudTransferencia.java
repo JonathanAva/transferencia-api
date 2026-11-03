@@ -3,7 +3,6 @@ package com.izalco.transferencias.api;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.DecimalMin;
-import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -32,7 +31,7 @@ public record SolicitudTransferencia(
 
         @NotNull
         @DecimalMin(value = "0", inclusive = false, message = "debe ser mayor que 0")
-        @Digits(integer = 13, fraction = 2, message = "debe tener máximo 13 enteros y 2 decimales")
+        @MontoValido
         BigDecimal monto,
 
         @NotBlank

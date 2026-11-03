@@ -553,8 +553,9 @@ components:
         monto:
           type: number
           description: |
-            Importe a transferir. Mayor que 0, máximo 2 decimales y 13 dígitos enteros.
-            Internamente se maneja como `BigDecimal` (nunca punto flotante).
+            Importe a transferir. Mayor que 0, máximo 13 dígitos enteros y 2 decimales **significativos**:
+            los ceros a la derecha no cuentan (`150.750` se acepta y equivale a `150.75`; `150.755` se
+            rechaza con `400 SOLICITUD_INVALIDA`). Internamente se maneja como `BigDecimal` (nunca punto flotante).
           exclusiveMinimum: 0
           maximum: 9999999999999.99
           example: 150.75
