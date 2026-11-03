@@ -240,6 +240,11 @@ public class ServicioTransferencias {
             TransferenciaEntidad t = transferencias.findById(id).orElseThrow();
             t.registrarResultado(estado, referencia, mensaje, ahora());
             String cuerpo = json(armarCuerpo.apply(t));
+            // Cuentas enmascaradas; el concepto no se registra (texto libre, puede traer datos personales).
+            log.info("Transferencia {} {} (HTTP {}): origen={} destino={} banco={} monto={} {} referenciaCore={}",
+                    id, estado, status, Enmascarador.cuenta(t.getCuentaOrigen()),
+                    Enmascarador.cuenta(t.getCuentaDestino()), t.getBancoDestino(), t.getMonto(), t.getMoneda(),
+                    referencia);
             if (llaves.completar(llave, status, cuerpo) == 0) {
                 // Solo pasa si otra solicitud la cerró como "atrapada" mientras esperábamos al core.
                 log.warn("La llave {} ya estaba cerrada; la transferencia {} se actualizó a {} igualmente",

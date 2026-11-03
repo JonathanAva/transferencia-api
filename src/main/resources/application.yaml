@@ -36,6 +36,12 @@ management:
     env:
       enabled: true
 
+# Logs en texto (local y dev): cada línea lleva el correlationId que FiltroCorrelationId guarda en el MDC.
+# En qa y prod se usan logs estructurados (JSON), que incluyen el MDC automáticamente.
+logging:
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
+
 # Core bancario legado.
 # URL y credenciales llegan SOLO por variables de entorno (en Kubernetes, desde un Secret).
 # El valor vacío después de ":" es intencional: si la variable no existe, la propiedad queda vacía,

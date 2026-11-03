@@ -10,5 +10,10 @@ spring:
       maximum-pool-size: ${DB_POOL_MAXIMO:10}
 
 logging:
+  # JSON en formato ECS (Elastic Common Schema): un agregador de logs lo indexa sin reglas de parseo,
+  # y el correlationId del MDC queda como un campo más para buscar.
+  structured:
+    format:
+      console: ecs
   level:
     com.izalco.transferencias: INFO

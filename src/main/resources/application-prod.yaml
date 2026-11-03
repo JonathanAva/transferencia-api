@@ -17,5 +17,9 @@ core:
   timeout-lectura: ${CORE_TIMEOUT_LECTURA:15s}
 
 logging:
+  # JSON en formato ECS (igual que qa): el correlationId del MDC queda como un campo indexado.
+  structured:
+    format:
+      console: ecs
   level:
     com.izalco.transferencias: INFO

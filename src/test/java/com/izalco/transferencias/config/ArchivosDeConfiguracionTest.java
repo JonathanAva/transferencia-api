@@ -59,6 +59,14 @@ class ArchivosDeConfiguracionTest {
                         .doesNotContainPattern("(?i)(https?|jdbc):"));
     }
 
+    /** Logs en JSON (ECS) en los ambientes compartidos: el correlationId queda como campo buscable. */
+    @ParameterizedTest
+    @ValueSource(strings = {"qa", "prod"})
+    void qaYProdUsanLogsEstructurados(String ambiente) throws IOException {
+        assertThat(propiedades("application-" + ambiente + ".yaml"))
+                .containsEntry("logging.structured.format.console", "ecs");
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"dev", "qa", "prod"})
     void cadaAmbienteSeIdentificaEnInfo(String ambiente) throws IOException {
