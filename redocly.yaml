@@ -1,0 +1,12 @@
+# Configuración del linter del contrato OpenAPI (Redocly CLI).
+# Uso: npx --yes @redocly/cli@2.64.1 lint
+apis:
+  transferencias:
+    root: src/main/resources/openapi/transferencias.yaml
+
+extends:
+  - recommended
+
+rules:
+  # El contrato incluye servidores localhost a propósito (ejecución local con y sin Kong).
+  no-server-example.com: off
