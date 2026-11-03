@@ -1,6 +1,13 @@
 spring:
   application:
     name: transferencia-api
+  jpa:
+    # No mantener la sesión de base de datos abierta mientras se escribe la respuesta HTTP.
+    open-in-view: false
+    hibernate:
+      # El esquema lo crea Flyway. Hibernate solo verifica que las entidades coincidan y,
+      # si no coinciden, la aplicación no arranca.
+      ddl-auto: validate
 
 # Core bancario legado.
 # URL y credenciales llegan SOLO por variables de entorno (en Kubernetes, desde un Secret).
