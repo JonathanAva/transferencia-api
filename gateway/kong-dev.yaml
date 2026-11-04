@@ -1,0 +1,53 @@
+# Kong Gateway DB-less: políticas de la API como código, ambiente dev.
+#
+# Plantilla: ${CLIENT_ID_APP_MOVIL} lo reemplaza el pipeline (envsubst) con el secreto del GitHub
+# Environment "dev" justo antes de arrancar Kong. La llave real nunca se escribe en este repositorio.
+# (Kong OSS 3.9 no resuelve {vault://...} en las credenciales de key-auth: se verificó, guarda el texto literal.)
+#
+# Validación: scripts/ci/validar-config-ambientes.sh (kong config parse, sin llaves literales,
+# etiqueta del ambiente, límites distintos por ambiente).
+_format_version: "3.0"
+
+services:
+  - name: transferencia-api
+    url: http://transferencia-api:8080
+    tags: [transferencia-api, ambiente-dev]
+    # Cadena de timeouts: app móvil (30 s) > gateway (20 s) > lectura del core en la API (15 s) > p95 del core.
+    connect_timeout: 2000
+    read_timeout: 20000
+    write_timeout: 20000
+    # Sin reintentos: un POST de transferencia nunca se reenvía automáticamente (el core no es idempotente).
+    retries: 0
+    routes:
+      - name: transferencias
+        paths: [/transferencias]
+        methods: [GET, POST]
+        strip_path: false
+        tags: [transferencia-api, ambiente-dev]
+    plugins:
+      # Client ID enforcement: sin header client_id válido → 401. El header no llega a la API.
+      - name: key-auth
+        tags: [transferencia-api, ambiente-dev]
+        config:
+          key_names: [client_id]
+          key_in_header: true
+          key_in_query: false
+          key_in_body: false
+          hide_credentials: true
+      # Rate limiting por consumidor (límite bajo: solo desarrollo). Al superarlo → 429 con Retry-After.
+      - name: rate-limiting
+        tags: [transferencia-api, ambiente-dev]
+        config:
+          minute: 30
+          hour: 600
+          limit_by: consumer
+          policy: local
+          fault_tolerant: true
+
+consumers:
+  - username: app-movil-dev
+    custom_id: app-movil-dev
+    tags: [transferencia-api, ambiente-dev]
+    keyauth_credentials:
+      - key: "${CLIENT_ID_APP_MOVIL}"
+        tags: [transferencia-api, ambiente-dev]

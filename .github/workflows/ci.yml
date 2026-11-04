@@ -1,12 +1,16 @@
 # Integración continua: corre en cada push a main y en cada pull request.
 #
-#   contrato ─┐
-#   build ────┴─► imagen
+#   contrato ─────────┐
+#   config-ambientes ─┤
+#   build ──► imagen ─┴──► resultado ("CI completo")
 #
 # - contrato: lint del contrato OpenAPI con Redocly.
+# - config-ambientes: manifiestos de Kubernetes (Kustomize + kubeconform) y políticas de Kong por ambiente.
 # - build:    mvnw verify (pruebas + gate de cobertura ≥ 80 %), verifica que las pruebas realmente corrieron,
 #             publica reportes y el jar probado como artefactos.
 # - imagen:   construye la imagen Docker con ESE MISMO jar (no recompila) y la arranca (prueba de humo).
+# - resultado: falla si CUALQUIER job anterior no terminó en success. GitHub cuenta un job "skipped" como
+#             exitoso aunque sea un check obligatorio; este job lo convierte en fallo. Es el check que exige el ruleset.
 #
 # Seguridad del workflow:
 # - Actions fijadas por SHA completo del commit: un tag (v7) se puede mover a otro código; un SHA no.
@@ -20,6 +24,20 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # El workflow de release (cd.yml) reutiliza este mismo CI: un release pasa exactamente por los mismos
+  # controles que un PR. Con guardar-imagen, el job imagen guarda la imagen ya probada para publicarla tal cual.
+  workflow_call:
+    inputs:
+      guardar-imagen:
+        type: boolean
+        default: false
+      version:
+        type: string
+        default: ""
+    outputs:
+      jar-sha256:
+        description: SHA-256 del jar que pasó verify
+        value: ${{ jobs.build.outputs.jar-sha256 }}
 
 permissions:
   contents: read
@@ -47,6 +65,21 @@ jobs:
 
       - name: Lint con Redocly (reglas en redocly.yaml)
         run: npx --yes @redocly/cli@2.64.1 lint
+
+  config-ambientes:
+    name: Configuración de ambientes (Kustomize y Kong)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # kustomize build + kubeconform; prod ≥ 2 réplicas; sin URLs cruzadas entre ambientes;
+      # Kong válido, sin llaves escritas y con límites distintos por ambiente.
+      - name: Validar manifiestos y políticas de cada ambiente
+        run: bash scripts/ci/validar-config-ambientes.sh
 
   build:
     name: Build, pruebas y cobertura
@@ -141,17 +174,33 @@ jobs:
       - name: Construir la imagen (sin recompilar)
         env:
           SHA_JAR: ${{ needs.build.outputs.jar-sha256 }}
+          VERSION: ${{ inputs.version }}
         run: |
           docker build \
             --build-context jar=artefacto \
             --build-arg JAR_SHA256="$SHA_JAR" \
-            --build-arg VERSION="ci-${GITHUB_SHA::12}" \
+            --build-arg VERSION="${VERSION:-ci-${GITHUB_SHA::12}}" \
             --build-arg REVISION="$GITHUB_SHA" \
             --tag transferencia-api:ci .
           docker image inspect transferencia-api:ci --format '{{json .Config.Labels}}'
 
       - name: Prueba de humo (arranca con PostgreSQL y responde health UP)
         run: bash scripts/ci/smoke-imagen.sh transferencia-api:ci
+
+      # Solo en un release: se guarda LA imagen que acaba de pasar la prueba de humo. El job "publicar"
+      # de cd.yml la carga y la sube a GHCR sin reconstruirla (build once también para la imagen).
+      - name: Guardar la imagen probada
+        if: inputs.guardar-imagen
+        run: docker save transferencia-api:ci | gzip -1 > imagen-probada.tar.gz
+
+      - name: Publicar la imagen probada como artefacto
+        if: inputs.guardar-imagen
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: imagen-probada
+          path: imagen-probada.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Publicar log de la prueba de humo
         if: failure()
@@ -160,3 +209,24 @@ jobs:
           name: log-smoke
           path: smoke-api.log
           retention-days: 7
+
+  # Un job "skipped" cuenta como éxito para el ruleset, aunque sea obligatorio: si build falla, imagen se salta y
+  # su check queda verde. Este job exige que TODOS terminen en success (skipped, cancelled o failure → falla).
+  resultado:
+    name: CI completo
+    # always(): sin esto, este job también se saltaría cuando falla otro, y volvería a contar como éxito.
+    if: always()
+    needs: [contrato, config-ambientes, build, imagen]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Todos los jobs deben terminar en success
+        env:
+          RESULTADOS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTADOS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if ! echo "$RESULTADOS" | jq -e 'all(.[]; .result == "success")' > /dev/null; then
+            echo "::error::Algún job del CI no terminó en success (skipped o cancelled también cuentan como fallo)."
+            exit 1
+          fi
+          echo "✔ Todos los jobs del CI terminaron en success."

@@ -1,0 +1,28 @@
+# Ambiente qa. La imagen se fija POR DIGEST en el despliegue:
+#   kustomize edit set image ghcr.io/jonathanava/transferencia-api=ghcr.io/jonathanava/transferencia-api@sha256:<digest>
+# El Secret "transferencia-api-secretos" (DB_USUARIO, DB_PASSWORD, CORE_USUARIO, CORE_PASSWORD) y el Secret
+# "kong-config" (gateway/kong-qa.yaml completado) los crea el pipeline desde los secretos del environment "qa".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: transferencias-qa
+labels:
+  - pairs:
+      app.kubernetes.io/environment: qa
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - ../../base
+configMapGenerator:
+  - name: transferencia-api-config
+    literals:
+      - SPRING_PROFILES_ACTIVE=qa
+      - CORE_URL=https://core-qa.izalco.internal/core/transferencias
+      - DB_URL=jdbc:postgresql://postgres-qa.izalco.internal:5432/transferencias
+      - CORE_TIMEOUT_LECTURA=15s
+      - DB_POOL_MAXIMO=10
+patches:
+  - target: { kind: Deployment, name: transferencia-api }
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1

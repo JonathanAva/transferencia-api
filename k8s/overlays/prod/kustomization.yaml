@@ -1,0 +1,48 @@
+# Ambiente prod. La imagen se fija POR DIGEST en el despliegue:
+#   kustomize edit set image ghcr.io/jonathanava/transferencia-api=ghcr.io/jonathanava/transferencia-api@sha256:<digest>
+# El Secret "transferencia-api-secretos" (DB_USUARIO, DB_PASSWORD, CORE_USUARIO, CORE_PASSWORD) y el Secret
+# "kong-config" (gateway/kong-prod.yaml completado) los crea el pipeline desde los secretos del environment "prod".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: transferencias-prod
+labels:
+  - pairs:
+      app.kubernetes.io/environment: prod
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - ../../base
+  - pdb.yaml
+configMapGenerator:
+  - name: transferencia-api-config
+    literals:
+      - SPRING_PROFILES_ACTIVE=prod
+      - CORE_URL=https://core.izalco.internal/core/transferencias
+      - DB_URL=jdbc:postgresql://postgres.izalco.internal:5432/transferencias
+      # Revisar contra el p95 real del core antes de cada cambio (incidente: timeout 5 s vs p95 9.8 s).
+      - CORE_TIMEOUT_LECTURA=15s
+      # 2 réplicas x 20 conexiones = 40: debe caber en max_connections de PostgreSQL.
+      - DB_POOL_MAXIMO=20
+patches:
+  # Alta disponibilidad: 2 réplicas de la API y de Kong (el incidente tenía 1), repartidas en nodos distintos.
+  - target: { kind: Deployment, name: transferencia-api }
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value: { requests: { cpu: 500m, memory: 768Mi }, limits: { memory: 1Gi } }
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels: { app.kubernetes.io/name: transferencia-api }
+  - target: { kind: Deployment, name: kong }
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
