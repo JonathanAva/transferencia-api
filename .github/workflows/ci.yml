@@ -1,9 +1,11 @@
 # Integración continua: corre en cada push a main y en cada pull request.
 #
-#   contrato ─┐
-#   build ────┴─► imagen
+#   contrato
+#   config-ambientes
+#   build ──► imagen
 #
 # - contrato: lint del contrato OpenAPI con Redocly.
+# - config-ambientes: manifiestos de Kubernetes (Kustomize + kubeconform) y políticas de Kong por ambiente.
 # - build:    mvnw verify (pruebas + gate de cobertura ≥ 80 %), verifica que las pruebas realmente corrieron,
 #             publica reportes y el jar probado como artefactos.
 # - imagen:   construye la imagen Docker con ESE MISMO jar (no recompila) y la arranca (prueba de humo).
@@ -47,6 +49,21 @@ jobs:
 
       - name: Lint con Redocly (reglas en redocly.yaml)
         run: npx --yes @redocly/cli@2.64.1 lint
+
+  config-ambientes:
+    name: Configuración de ambientes (Kustomize y Kong)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # kustomize build + kubeconform; prod ≥ 2 réplicas; sin URLs cruzadas entre ambientes;
+      # Kong válido, sin llaves escritas y con límites distintos por ambiente.
+      - name: Validar manifiestos y políticas de cada ambiente
+        run: bash scripts/ci/validar-config-ambientes.sh
 
   build:
     name: Build, pruebas y cobertura

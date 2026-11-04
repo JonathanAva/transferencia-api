@@ -1,0 +1,15 @@
+# Solo accesible dentro del clúster: el tráfico externo entra únicamente por Kong.
+apiVersion: v1
+kind: Service
+metadata:
+  name: transferencia-api
+  labels:
+    app.kubernetes.io/name: transferencia-api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: transferencia-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

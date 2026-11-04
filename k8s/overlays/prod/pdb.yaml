@@ -1,0 +1,10 @@
+# Durante mantenimientos del clúster (drenar un nodo), siempre queda al menos 1 pod de la API atendiendo.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: transferencia-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: transferencia-api

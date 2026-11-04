@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transferencia-api
+  labels:
+    app.kubernetes.io/name: transferencia-api
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: transferencia-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0   # nunca quedarse con menos pods listos durante un despliegue
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: transferencia-api
+    spec:
+      serviceAccountName: transferencia-api
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          # El overlay/pipeline la reemplaza por ghcr.io/...@sha256:<digest> (nunca por un tag).
+          image: ghcr.io/jonathanava/transferencia-api
+          ports:
+            - name: http
+              containerPort: 8080
+          # Configuración no sensible (perfil, URLs, timeouts) desde el ConfigMap del ambiente;
+          # usuarios y contraseñas desde el Secret del ambiente (creado fuera de Git).
+          envFrom:
+            - configMapRef:
+                name: transferencia-api-config
+            - secretRef:
+                name: transferencia-api-secretos
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp   # Tomcat necesita escribir archivos temporales
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 5
+            failureThreshold: 30   # hasta 150 s para arrancar (Flyway incluido)
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 768Mi }
+      volumes:
+        - name: tmp
+          emptyDir: {}

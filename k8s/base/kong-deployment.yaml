@@ -1,0 +1,61 @@
+# Kong Gateway en modo DB-less: toda su configuración es el archivo declarativo gateway/kong-<ambiente>.yaml.
+# Como ese archivo, ya completado, contiene la llave del consumidor, se monta desde un Secret
+# (kong-config) que el pipeline crea con el secreto del GitHub Environment; nunca desde Git.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kong
+  labels:
+    app.kubernetes.io/name: kong
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kong
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kong
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001   # usuario "kong" de la imagen oficial (verificado con: docker run --entrypoint id kong:3.9.1)
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kong
+          image: kong:3.9.1
+          env:
+            - { name: KONG_DATABASE, value: "off" }
+            - { name: KONG_DECLARATIVE_CONFIG, value: /kong/kong.yaml }
+            - { name: KONG_PROXY_LISTEN, value: "0.0.0.0:8000" }
+            - { name: KONG_STATUS_LISTEN, value: "0.0.0.0:8100" }
+            - { name: KONG_ADMIN_LISTEN, value: "off" }   # sin Admin API: la configuración solo cambia por Git
+            - { name: KONG_PROXY_ACCESS_LOG, value: /dev/stdout }
+            - { name: KONG_PROXY_ERROR_LOG, value: /dev/stderr }
+          ports:
+            - { name: proxy, containerPort: 8000 }
+            - { name: status, containerPort: 8100 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /kong
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /status/ready, port: status }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /status, port: status }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: config
+          secret:
+            secretName: kong-config
