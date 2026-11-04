@@ -7,7 +7,8 @@ integrándose con el core bancario legado (XML), y la **plataforma de entrega** 
 Prod apuntando al core de QA, transferencias duplicadas por reintentos, un SNAPSHOT desplegado con un usuario personal
 y sin aprobación: cada causa tiene un control que la detiene y una prueba o un check que lo demuestra.
 
-- **Post-mortem:** [`docs/postmortem-INC-2026-118.md`](docs/postmortem-INC-2026-118.md), con la configuración
+- **Post-mortem:** [`docs/postmortem-INC-2026-118.md`](docs/postmortem-INC-2026-118.md) (una página; también en
+  [PDF](docs/postmortem-INC-2026-118.pdf)), con la configuración
   [original](docs/incidente/config-prod.original.yaml) y [corregida](docs/incidente/config-prod.corregido.yaml).
 - **Contrato:** [`src/main/resources/openapi/transferencias.yaml`](src/main/resources/openapi/transferencias.yaml) (OpenAPI 3.1).
 - **Pipeline:** [`ci.yml`](.github/workflows/ci.yml) (cada PR) y [`cd.yml`](.github/workflows/cd.yml) (release por tag).
@@ -61,7 +62,7 @@ Cada entregable de la prueba, dónde está implementado y qué lo verifica.
 
 | Requisito | Dónde |
 |---|---|
-| Post-mortem INC-2026-118 (máximo una página): hallazgos, causa raíz, impacto, corrección inmediata y controles | [`docs/postmortem-INC-2026-118.md`](docs/postmortem-INC-2026-118.md), con [`config-prod` original y corregido](docs/incidente) |
+| Post-mortem INC-2026-118 (máximo una página): hallazgos, causa raíz, impacto, corrección inmediata y controles | [`docs/postmortem-INC-2026-118.md`](docs/postmortem-INC-2026-118.md) ([PDF de una página carta](docs/postmortem-INC-2026-118.pdf)), con [`config-prod` original y corregido](docs/incidente) |
 | README con decisiones de diseño y diagrama del pipeline | Este documento: [decisiones](#decisiones-de-diseño) y [flujo del pipeline](#flujo-del-pipeline) |
 
 ## Decisiones de diseño
