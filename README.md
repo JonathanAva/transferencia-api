@@ -3,7 +3,9 @@
 API para que la app móvil de Banco Izalco Digital registre y consulte transferencias
 interbancarias, integrándose con el core bancario legado (XML).
 
-> Documento en construcción: el post-mortem y la revisión final se agregan en las siguientes fases.
+> **Post-mortem del incidente INC-2026-118:** [`docs/postmortem-INC-2026-118.md`](docs/postmortem-INC-2026-118.md)
+> (configuración [original](docs/incidente/config-prod.original.yaml) y [corregida](docs/incidente/config-prod.corregido.yaml)).
+> Documento en construcción: la revisión final se agrega en la siguiente fase.
 
 ## Contrato de la API
 
@@ -368,3 +370,5 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
     límites fijos en el código (06:00–18:00, nunca viernes ni fin de semana). No hay excepción por rama ni por usuario:
     las emergencias siguen el [proceso de cambio de emergencia](#cambio-de-emergencia-fuera-de-la-ventana). Los feriados
     quedan fuera del alcance.
+36. **Hora del incidente:** el anexo indica que a las 4:55 p.m. la app móvil **reporta** el problema. Como los 504 empiezan
+    a las 4:40, se asume que el despliegue fue antes de las 4:40 (el log del pipeline no trae hora).
