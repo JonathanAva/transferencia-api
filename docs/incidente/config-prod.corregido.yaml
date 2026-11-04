@@ -1,0 +1,63 @@
+# INC-2026-118 — config-prod.yaml corregido. Compárese línea a línea con config-prod.original.yaml.
+#
+# Documento de referencia: conserva las claves del archivo original para que la comparación sea directa.
+# En el proyecto, la configuración ya NO vive en un único archivo copiado a mano entre ambientes:
+#   - Lo que no es secreto (perfil, URLs, timeouts, réplicas) → k8s/overlays/prod/kustomization.yaml (ConfigMap).
+#   - Las credenciales → Secret "transferencia-api-secretos", creado por el pipeline desde el environment "prod".
+#   - El artefacto (src/main/resources/application*.yaml) no contiene URLs ni secretos; lo verifica
+#     ArchivosDeConfiguracionTest y el build falla si alguien los escribe.
+core:
+  # CAMBIO 1 — era "https://core-qa.izalco.local/transfer": prod llamaba al core de QA (p95 9.8 s).
+  #   Valor de prod: k8s/overlays/prod/kustomization.yaml (CORE_URL).
+  #   Barreras: GuardiaAmbiente.java no deja arrancar con perfil prod si la URL contiene qa/dev/test/uat/staging,
+  #   y scripts/ci/validar-config-ambientes.sh falla en el CI si un overlay usa URLs de otro ambiente.
+  url: "https://core.izalco.internal/core/transferencias"
+
+  # CAMBIO 2 — era "svc_core" escrito en el archivo. Usuario de servicio del core, desde el Secret del ambiente.
+  user: "${CORE_USUARIO}"
+
+  # CAMBIO 3 — era una contraseña en texto plano (expuesta: se rota). Solo por variable de entorno, sin valor por
+  #   defecto: si falta, CoreProperties (@Validated, @NotBlank) impide arrancar. toString() la enmascara.
+  password: "${CORE_PASSWORD}"
+
+  # CAMBIO 4 — era "timeout: 5000" (5 s, menor que el p95 de 9.8 s): un solo timeout para todo.
+  #   Ahora son dos, con significados distintos (ConfiguracionClienteCore.java, ClienteCore.java):
+  #   - conexión 2 s: si vence, la solicitud NO llegó al core → 503 CORE_NO_DISPONIBLE y la llave se libera.
+  #   - lectura 15 s: si vence, el core SÍ pudo procesarla → 504 CORE_TIMEOUT, PENDIENTE_CONFIRMACION, sin reintento.
+  #   La lectura debe superar el p95 real del core de PROD (medido); CoreProperties exige conexión < lectura.
+  timeout-conexion: 2s
+  timeout-lectura: 15s
+
+  # SIN CAMBIO — "retries: 0" era correcto: el core no es idempotente y un POST de dinero no se reintenta solo.
+  #   Se mantiene en la API (sin Spring Retry) y se agrega en el gateway (gateway/kong-prod.yaml: retries: 0).
+  retries: 0
+
+api:
+  # CAMBIO 5 — era "autodiscovery.apiId: 18877421", el mismo ID que QA (políticas y analítica mezcladas).
+  #   Ahora el gateway es Kong DB-less con políticas como código (gateway/kong-prod.yaml):
+  #   - consumidor propio de prod y client_id desde el secreto CLIENT_ID_APP_MOVIL del environment "prod";
+  #   - .github/workflows/cd.yml falla si la huella SHA-256 del client_id de prod coincide con la de dev o qa.
+  gateway:
+    consumidor: app-movil-prod
+    client_id: "${CLIENT_ID_APP_MOVIL}"   # key-auth, header client_id
+    rate_limiting_por_minuto: 120         # dev 30, qa 60: distintos por ambiente (lo valida el CI)
+    read_timeout_ms: 20000                # cadena: app 30 s > gateway 20 s > API→core 15 s > p95 del core
+
+idempotency:
+  # CAMBIO 6 — era "enabled: false": cada reintento de la app ante un 504 creaba una transferencia nueva.
+  #   La idempotencia ya NO se puede apagar: no existe ninguna propiedad "enabled".
+  #   X-Idempotency-Key es obligatorio (sin él → 400); la llave se reserva en PostgreSQL ANTES de llamar al core
+  #   (INSERT ... ON CONFLICT DO NOTHING) y un reintento recibe la respuesta guardada sin volver a llamar al core.
+  #   Implementado en ServicioTransferencias.java e IdempotenciaRepositorio.java; vive en la base, no en memoria,
+  #   así que funciona con varias réplicas.
+  expiracion: 24h          # application.yaml: idempotencia.expiracion
+  margen-en-proceso: 30s   # llave atrapada (pod caído): se cierra como incierta, nunca se libera
+
+# CAMBIO 7 — era "replicas: 1". k8s/overlays/prod: 2 réplicas de la API y de Kong, repartidas entre nodos,
+#   PodDisruptionBudget (minAvailable: 1) y maxUnavailable: 0 en los despliegues.
+#   scripts/ci/validar-config-ambientes.sh falla si prod tiene menos de 2 réplicas o no tiene PDB.
+replicas: 2
+
+# NUEVO — perfil explícito del ambiente. GuardiaAmbiente rechaza dos perfiles de ambiente a la vez, y
+#   /actuator/info publica "ambiente: prod" y la versión: con un curl se ve qué corre en prod.
+profile: prod

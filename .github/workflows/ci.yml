@@ -5,7 +5,8 @@
 #   build ──► imagen ─┴──► resultado ("CI completo")
 #
 # - contrato: lint del contrato OpenAPI con Redocly.
-# - config-ambientes: manifiestos de Kubernetes (Kustomize + kubeconform) y políticas de Kong por ambiente.
+# - config-ambientes: manifiestos de Kubernetes (Kustomize + kubeconform), políticas de Kong por ambiente y
+#             pruebas de la ventana de cambio de prod.
 # - build:    mvnw verify (pruebas + gate de cobertura ≥ 80 %), verifica que las pruebas realmente corrieron,
 #             publica reportes y el jar probado como artefactos.
 # - imagen:   construye la imagen Docker con ESE MISMO jar (no recompila) y la arranca (prueba de humo).
@@ -80,6 +81,10 @@ jobs:
       # Kong válido, sin llaves escritas y con límites distintos por ambiente.
       - name: Validar manifiestos y políticas de cada ambiente
         run: bash scripts/ci/validar-config-ambientes.sh
+
+      # La ventana de cambio de prod (horario, variables y límites fijos) se prueba en cada PR.
+      - name: Probar la ventana de cambio de prod
+        run: bash scripts/ci/probar-ventana-de-cambio.sh
 
   build:
     name: Build, pruebas y cobertura

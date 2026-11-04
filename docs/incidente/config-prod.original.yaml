@@ -1,0 +1,15 @@
+# INC-2026-118 — config-prod.yaml tal como estaba desplegado en producción con la versión 2.3.0 (evidencia).
+# Se conserva sin cambios salvo la contraseña, que se redacta: un secreto expuesto no se vuelve a publicar
+# (se considera comprometido y se rota). La versión corregida está en config-prod.corregido.yaml.
+core:
+  url: "https://core-qa.izalco.local/transfer"
+  user: "svc_core"
+  password: "<REDACTADA>"
+  timeout: 5000
+  retries: 0
+api:
+  autodiscovery:
+    apiId: "18877421" # mismo ID que QA
+idempotency:
+  enabled: false
+replicas: 1
