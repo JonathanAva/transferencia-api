@@ -1,0 +1,217 @@
+# Release y despliegue continuo: se dispara SOLO al crear un tag vX.Y.Z.
+#
+#   validar-version ─► ci (mismo CI de los PR) ─► publicar (GHCR, digest) ─► dev ─► qa ─► [aprobación] prod
+#
+# - Un único artefacto: la imagen que pasó el CI se publica una vez y se identifica por su DIGEST
+#   (sha256:...). dev, qa y prod despliegan exactamente ese digest; nunca un tag, que puede moverse.
+# - Identidad de servicio: el GITHUB_TOKEN efímero de cada job (nunca un usuario ni un token personal).
+#   Permisos mínimos: contents: read en todo el workflow; packages: write SOLO en el job publicar.
+# - Cada despliegue usa un GitHub Environment (dev, qa, prod) con sus propios secretos.
+#   prod exige aprobación manual de un revisor distinto de quien creó el tag (prevent self-review)
+#   y solo acepta tags de release: ninguna rama (incluida hotfix/*) puede desplegar ni saltarse la aprobación.
+# - Destino: no hay clúster persistente gratuito, así que cada job levanta el ambiente de forma efímera en el
+#   runner (imagen por digest + Kong con su política + PostgreSQL y core simulados) y ejecuta la prueba de humo.
+#   En un banco real, el mismo job aplicaría k8s/overlays/<ambiente> en un clúster autenticándose por OIDC.
+
+name: CD
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+# Releases en serie y nunca cancelados a medias (un despliegue interrumpido es peor que uno lento).
+concurrency:
+  group: cd
+  cancel-in-progress: false
+
+env:
+  IMAGEN: ghcr.io/jonathanava/transferencia-api
+
+jobs:
+  validar-version:
+    name: Validar versión del release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Obtener el código (con historial, para verificar que el tag está en main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Instalar JDK 21 (Temurin)
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # Incidente: "Artifact: transfers-api-2.3.0-SNAPSHOT" llegó a prod. Aquí eso detiene el release.
+      - name: Tag = versión del pom, sin SNAPSHOT, y commit perteneciente a main
+        id: version
+        run: |
+          version=$(./mvnw --batch-mode --quiet help:evaluate -Dexpression=project.version -DforceStdout)
+          tag="${GITHUB_REF_NAME#v}"
+          echo "Tag: $GITHUB_REF_NAME   Versión del pom: $version"
+          if [[ "$version" == *SNAPSHOT* ]]; then
+            echo "::error::La versión del pom ($version) es SNAPSHOT: no se publica ni se despliega."; exit 1
+          fi
+          if [[ "$version" != "$tag" ]]; then
+            echo "::error::El tag $GITHUB_REF_NAME no coincide con la versión del pom ($version)."; exit 1
+          fi
+          # Solo se libera código que ya pasó por un PR a main (con CI obligatorio).
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::El commit del tag no pertenece a main: solo se libera código revisado."; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: CI del release
+    needs: validar-version
+    uses: ./.github/workflows/ci.yml
+    with:
+      guardar-imagen: true
+      version: ${{ needs.validar-version.outputs.version }}
+    permissions:
+      contents: read
+
+  publicar:
+    name: Publicar imagen en GHCR
+    needs: [validar-version, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write   # el ÚNICO job que puede escribir en el registro
+    outputs:
+      imagen: ${{ steps.push.outputs.imagen }}
+    steps:
+      - name: Descargar la imagen probada por el CI
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: imagen-probada
+
+      # No se reconstruye: se carga la imagen que pasó la prueba de humo y se verifica que contiene el jar probado.
+      - name: Cargar y verificar la imagen
+        env:
+          SHA_JAR: ${{ needs.ci.outputs.jar-sha256 }}
+        run: |
+          gunzip -c imagen-probada.tar.gz | docker load
+          etiqueta=$(docker image inspect transferencia-api:ci --format '{{ index .Config.Labels "com.izalco.jar.sha256" }}')
+          [ "$etiqueta" = "$SHA_JAR" ] || { echo "::error::La imagen no contiene el jar probado ($etiqueta ≠ $SHA_JAR)"; exit 1; }
+
+      - name: Autenticarse en GHCR con el GITHUB_TOKEN (identidad del workflow)
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publicar con tags X.Y.Z y SHA del commit, y obtener el digest
+        id: push
+        env:
+          VERSION: ${{ needs.validar-version.outputs.version }}
+        run: |
+          docker tag transferencia-api:ci "$IMAGEN:$VERSION"
+          docker tag transferencia-api:ci "$IMAGEN:sha-${GITHUB_SHA::12}"
+          docker push --quiet "$IMAGEN:$VERSION"
+          docker push --quiet "$IMAGEN:sha-${GITHUB_SHA::12}"
+          referencia=$(docker image inspect "$IMAGEN:$VERSION" --format '{{ index .RepoDigests 0 }}')
+          [[ "$referencia" =~ ^ghcr\.io/.+@sha256:[0-9a-f]{64}$ ]] || { echo "::error::Digest inválido: $referencia"; exit 1; }
+          echo "imagen=$referencia" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Imagen publicada"
+            echo "- Tags: \`$VERSION\`, \`sha-${GITHUB_SHA::12}\`"
+            echo "- **Digest promovido a dev → qa → prod:** \`$referencia\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cerrar sesión en GHCR
+        if: always()
+        run: docker logout ghcr.io
+
+  desplegar-dev:
+    name: Desplegar en dev
+    needs: publicar
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: dev
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      huella: ${{ steps.desplegar.outputs.huella-client-id }}
+    steps:
+      - &obtener-codigo
+        name: Obtener el código (scripts, gateway, deploy)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - &login-lectura
+        name: Autenticarse en GHCR (solo lectura)
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - &desplegar
+        name: Desplegar por digest y prueba de humo (health, 401, 201, 429)
+        id: desplegar
+        env:
+          CLIENT_ID_APP_MOVIL: ${{ secrets.CLIENT_ID_APP_MOVIL }}
+          REFERENCIA: ${{ needs.publicar.outputs.imagen }}
+        run: bash scripts/cd/desplegar-ambiente.sh "$AMBIENTE_DESTINO" "$REFERENCIA"
+    env:
+      AMBIENTE_DESTINO: dev
+
+  desplegar-qa:
+    name: Desplegar en qa
+    needs: [publicar, desplegar-dev]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: qa
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      huella: ${{ steps.desplegar.outputs.huella-client-id }}
+    env:
+      AMBIENTE_DESTINO: qa
+    steps:
+      - *obtener-codigo
+      - *login-lectura
+      - *desplegar
+
+  desplegar-prod:
+    name: Desplegar en prod
+    needs: [publicar, desplegar-dev, desplegar-qa]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # La aprobación manual la impone el environment "prod" (required reviewers + prevent self-review +
+    # solo tags v*). El job queda en espera hasta que un revisor distinto del autor lo apruebe.
+    environment:
+      name: prod
+    permissions:
+      contents: read
+      packages: read
+    env:
+      AMBIENTE_DESTINO: prod
+    steps:
+      - *obtener-codigo
+      # Incidente: prod usaba el mismo apiId que QA. Se compara la HUELLA (SHA-256) del client_id de prod con la de
+      # dev y qa: si coinciden, el ambiente comparte credencial y no se despliega. La credencial nunca sale del job.
+      - name: El client_id de prod no se comparte con otro ambiente
+        env:
+          CLIENT_ID_APP_MOVIL: ${{ secrets.CLIENT_ID_APP_MOVIL }}
+          HUELLA_DEV: ${{ needs.desplegar-dev.outputs.huella }}
+          HUELLA_QA: ${{ needs.desplegar-qa.outputs.huella }}
+        run: |
+          huella=$(printf '%s' "$CLIENT_ID_APP_MOVIL" | sha256sum | cut -d' ' -f1)
+          if [ "$huella" = "$HUELLA_DEV" ] || [ "$huella" = "$HUELLA_QA" ]; then
+            echo "::error::El client_id de prod es igual al de otro ambiente. Cada ambiente debe tener el suyo."; exit 1
+          fi
+          echo "✔ client_id propio de prod"
+      - *login-lectura
+      - *desplegar
