@@ -3,8 +3,7 @@
 API para que la app móvil de Banco Izalco Digital registre y consulte transferencias
 interbancarias, integrándose con el core bancario legado (XML).
 
-> Documento en construcción. Las secciones de arquitectura, ejecución y pipeline se completan
-> en las siguientes fases.
+> Documento en construcción: el post-mortem y la revisión final se agregan en las siguientes fases.
 
 ## Contrato de la API
 
@@ -92,13 +91,108 @@ La protección de ramas exige un repositorio público en el plan gratuito. Confi
 3. *Target branches → Add target → Include default branch*.
 4. Reglas:
    - **Restrict deletions** y **Block force pushes**.
-   - **Require a pull request before merging**.
-   - **Require status checks to pass**, con *Require branches to be up to date before merging*. Agregar los tres checks:
+   - **Require a pull request before merging**, con *Required approvals*: **0** (equipo de una persona; la
+     regla "quien aprueba no es el autor" se aplica donde importa: el environment `prod`).
+   - **Require status checks to pass**, con *Require branches to be up to date before merging*. Agregar los checks:
      - `Lint del contrato OpenAPI`
+     - `Configuración de ambientes (Kustomize y Kong)`
      - `Build, pruebas y cobertura`
      - `Imagen Docker con el jar probado`
 
 Con esto nadie puede llevar a `main` un cambio que no haya pasado el CI, ni siquiera el administrador. La bypass list está vacía.
+
+## Release y despliegue (CD)
+
+[`.github/workflows/cd.yml`](.github/workflows/cd.yml) se dispara **solo** al crear un tag `vX.Y.Z`:
+
+```mermaid
+flowchart LR
+    T[tag vX.Y.Z] --> V{versión del pom = tag?<br/>¿sin SNAPSHOT?<br/>¿commit en main?}
+    V -- no --> X[falla]
+    V -- sí --> C[CI completo<br/>mismo de los PR]
+    C --> P[publicar en GHCR<br/>imagen probada<br/>→ digest sha256]
+    P --> D[dev<br/>digest + Kong<br/>prueba de humo]
+    D --> Q[qa<br/>digest + Kong<br/>prueba de humo]
+    Q --> A{{aprobación manual<br/>revisor ≠ autor}}
+    A --> R[prod<br/>client_id propio<br/>digest + Kong<br/>prueba de humo]
+```
+
+| Control | Cómo |
+|---|---|
+| Sin SNAPSHOT, versión coherente | El job `validar-version` falla si el `pom` es SNAPSHOT o no coincide con el tag |
+| Solo código revisado | El commit del tag debe pertenecer a `main` (que exige PR + CI) |
+| Mismo artefacto | La imagen que pasó el CI se publica **sin reconstruir** y se despliega por **digest** en los tres ambientes |
+| Identidad de servicio | `GITHUB_TOKEN` efímero; `packages: write` solo en `publicar`; el resto, solo lectura |
+| Aprobación antes de prod | Environment `prod` con *required reviewers* y *prevent self-review* |
+| Ninguna rama se salta la aprobación | Environment `prod` acepta solo tags `v*.*.*`; las ramas (incluida `hotfix/*`) no pueden desplegar |
+| Credenciales por ambiente | Secreto `CLIENT_ID_APP_MOVIL` en cada environment; prod falla si su huella coincide con la de dev o qa |
+| Políticas de API como código | `gateway/kong-<ambiente>.yaml`: `key-auth` (header `client_id`) y `rate-limiting` 30 / 60 / 120 por minuto |
+
+**Destino del despliegue.** No hay un clúster persistente gratuito, así que cada job levanta el ambiente de forma
+efímera en el runner ([`deploy/docker-compose.yml`](deploy/docker-compose.yml)): la imagen **por digest**, Kong DB-less
+con su política, PostgreSQL y el core simulado. Después, [`smoke-ambiente.sh`](scripts/cd/smoke-ambiente.sh) comprueba:
+- `/actuator/health` UP con el perfil del ambiente;
+- `401` sin `client_id` o con uno inválido;
+- `201` de punta a punta con el `client_id` del ambiente;
+- `429` con `Retry-After` al superar el límite.
+
+En un ambiente real, el mismo job aplicaría [`k8s/overlays/<ambiente>`](k8s/) en un clúster persistente
+autenticándose por **OIDC**, sin secretos de larga duración.
+
+### Kubernetes (Kustomize)
+
+[`k8s/base`](k8s/base) incluye:
+- **API:** pods no root (UID 10001), sistema de archivos de solo lectura, sin capacidades, sondas `startup`/`liveness`/`readiness`, `maxUnavailable: 0` y sin token de la API de Kubernetes.
+- **Kong DB-less**, con su configuración montada desde un `Secret`.
+
+Cada overlay ([`dev`](k8s/overlays/dev), [`qa`](k8s/overlays/qa), [`prod`](k8s/overlays/prod)) fija:
+- su namespace, con *Pod Security* `restricted`;
+- su `ConfigMap`, con perfil, URLs, timeouts y pool;
+- réplicas y recursos.
+
+`prod` tiene **2 réplicas** de API y Kong, reparto entre nodos y `PodDisruptionBudget`.
+
+La imagen se fija por digest al desplegar:
+```bash
+kustomize edit set image ghcr.io/jonathanava/transferencia-api=ghcr.io/jonathanava/transferencia-api@sha256:<digest>
+```
+El job `config-ambientes` del CI valida todo con `kustomize build` + `kubeconform -strict` y reglas propias
+([`validar-config-ambientes.sh`](scripts/ci/validar-config-ambientes.sh)):
+- prod con 2 o más réplicas y PDB;
+- ningún ambiente con URLs de otro;
+- namespaces, consumidores y etiquetas propios;
+- Kong válido (`kong config parse`), sin llaves escritas y con límites distintos.
+
+### Configurar los environments en GitHub
+
+Requiere repositorio **público** en el plan gratuito. Los revisores obligatorios de un environment solo están
+disponibles en repositorios públicos o en planes pagos.
+
+1. **Secretos de cada ambiente.** *Settings → Environments → New environment*. Crear `dev`, `qa` y `prod`. En cada uno,
+   *Environment secrets → Add environment secret*: `CLIENT_ID_APP_MOVIL` con un valor **distinto** por ambiente.
+   Para generar uno: `[guid]::NewGuid().ToString("N")` en PowerShell.
+2. **`dev` y `qa`.** *Deployment branches and tags → Selected branches and tags → Add deployment branch or tag rule*:
+   tipo **Tag**, patrón `v*.*.*`.
+3. **`prod`:**
+   - **Required reviewers**: activar y agregar al menos un revisor que **no** sea quien crea los tags. Hace falta
+     una segunda cuenta de GitHub con acceso al repositorio (*Settings → Collaborators*).
+   - **Prevent self-review**: activar. Quien disparó el despliegue (quien hizo push del tag) no puede aprobarlo.
+   - **Allow administrators to bypass configured protection rules**: **desactivar**.
+   - *Deployment branches and tags*: **Selected branches and tags**, solo la regla de tipo **Tag** `v*.*.*`. Así
+     ninguna rama (`main`, `hotfix/*`…) puede desplegar en prod.
+4. *(Opcional)* **Wait timer** en `prod` (p. ej. 5 minutos) para tener un margen de cancelación.
+
+### Publicar una versión
+
+```powershell
+# 1. En una rama: subir la versión del pom (sin SNAPSHOT), PR y merge a main con el CI en verde.
+.\mvnw.cmd versions:set -DnewVersion=1.0.1 -DgenerateBackupPoms=false
+# 2. Desde main actualizado: crear y subir el tag.
+git switch main; git pull
+git tag -a v1.0.1 -m "Release 1.0.1"
+git push origin v1.0.1
+# 3. Actions → CD: dev y qa se despliegan solos; prod espera la aprobación del revisor.
+```
 
 ## Configuración por ambiente
 
@@ -238,3 +332,14 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
 29. **Pruebas mínimas:** el paso de evidencia exige más de 0 pruebas, no un número fijo. Un mínimo fijo
     obligaría a cambiar el workflow cada vez que se agregan pruebas; borrar pruebas en masa ya lo detecta
     el gate de cobertura.
+30. **Llave de Kong como plantilla:** Kong OSS 3.9 no resuelve referencias `{vault://env/...}` en las credenciales
+    de `key-auth`; se verificó que guarda el texto literal. La llave se inyecta con `envsubst` desde el secreto del
+    environment en el momento del despliegue, y el CI falla si alguien escribe una llave literal en el archivo.
+31. **Rate limiting `policy: local`:** el contador vive en cada nodo de Kong. Con 2 réplicas, el límite efectivo
+    puede llegar al doble. En producción se usaría `policy: redis` para un contador compartido.
+32. **Kong 3.9.1:** es la última versión de Kong Gateway publicada como imagen OSS. Las siguientes requieren licencia
+    Enterprise o Konnect.
+33. **Ambientes efímeros:** el despliegue a dev/qa/prod levanta el ambiente en el runner y lo destruye al terminar.
+    Demuestra la promoción por digest, las políticas y la aprobación; no deja un servicio corriendo.
+34. **Versión del pom:** `main` queda en la última versión liberada (`1.0.0`) y la siguiente se fija en el PR que la
+    prepara. Se descartó `-SNAPSHOT` en `main` porque obligaría a un commit extra en cada release.
