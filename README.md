@@ -72,6 +72,11 @@ flowchart LR
 | | Publica `reporte-cobertura`, `reporte-pruebas` y `jar-probado` (jar + SHA-256) | — |
 | `imagen` | Descarga `jar-probado`, verifica el SHA-256 y construye la imagen **sin recompilar** | el jar no es el que pasó `verify` |
 | | [`smoke-imagen.sh`](scripts/ci/smoke-imagen.sh): arranca la imagen con PostgreSQL | no corre como UID 10001 o `/actuator/health` no responde `UP` |
+| `resultado` (*CI completo*) | Revisa el resultado de todos los jobs anteriores (`if: always()`) | algún job no terminó en `success`: un job *skipped* o *cancelled* cuenta como fallo |
+
+**Por qué existe `CI completo`.** GitHub cuenta un job *skipped* como exitoso, aunque sea un check obligatorio del
+ruleset. Si `build` falla, `imagen` se salta y su check queda en verde. `CI completo` convierte cualquier resultado
+distinto de `success` en un fallo, así que ningún job saltado puede dejar pasar un PR.
 
 **Build once.** El jar que pasa `verify` es el que entra en la imagen: el job `imagen` lo pasa al Dockerfile
 con `--build-context jar=artefacto`, que reemplaza la etapa `jar` del Dockerfile, así que la etapa de
@@ -100,6 +105,7 @@ La protección de ramas exige un repositorio público en el plan gratuito. Confi
      - `Configuración de ambientes (Kustomize y Kong)`
      - `Build, pruebas y cobertura`
      - `Imagen Docker con el jar probado`
+     - `CI completo` (falla si cualquiera de los anteriores se saltó o se canceló)
 
 Con esto nadie puede llevar a `main` un cambio que no haya pasado el CI, ni siquiera el administrador. La bypass list está vacía.
 

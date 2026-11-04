@@ -1,8 +1,8 @@
 # Integración continua: corre en cada push a main y en cada pull request.
 #
-#   contrato
-#   config-ambientes
-#   build ──► imagen
+#   contrato ─────────┐
+#   config-ambientes ─┤
+#   build ──► imagen ─┴──► resultado ("CI completo")
 #
 # - contrato: lint del contrato OpenAPI con Redocly.
 # - config-ambientes: manifiestos de Kubernetes (Kustomize + kubeconform), políticas de Kong por ambiente y
@@ -10,6 +10,8 @@
 # - build:    mvnw verify (pruebas + gate de cobertura ≥ 80 %), verifica que las pruebas realmente corrieron,
 #             publica reportes y el jar probado como artefactos.
 # - imagen:   construye la imagen Docker con ESE MISMO jar (no recompila) y la arranca (prueba de humo).
+# - resultado: falla si CUALQUIER job anterior no terminó en success. GitHub cuenta un job "skipped" como
+#             exitoso aunque sea un check obligatorio; este job lo convierte en fallo. Es el check que exige el ruleset.
 #
 # Seguridad del workflow:
 # - Actions fijadas por SHA completo del commit: un tag (v7) se puede mover a otro código; un SHA no.
@@ -212,3 +214,24 @@ jobs:
           name: log-smoke
           path: smoke-api.log
           retention-days: 7
+
+  # Un job "skipped" cuenta como éxito para el ruleset, aunque sea obligatorio: si build falla, imagen se salta y
+  # su check queda verde. Este job exige que TODOS terminen en success (skipped, cancelled o failure → falla).
+  resultado:
+    name: CI completo
+    # always(): sin esto, este job también se saltaría cuando falla otro, y volvería a contar como éxito.
+    if: always()
+    needs: [contrato, config-ambientes, build, imagen]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Todos los jobs deben terminar en success
+        env:
+          RESULTADOS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTADOS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if ! echo "$RESULTADOS" | jq -e 'all(.[]; .result == "success")' > /dev/null; then
+            echo "::error::Algún job del CI no terminó en success (skipped o cancelled también cuentan como fallo)."
+            exit 1
+          fi
+          echo "✔ Todos los jobs del CI terminaron en success."
