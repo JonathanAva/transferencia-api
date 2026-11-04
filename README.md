@@ -20,6 +20,7 @@ WireMock 3 · JaCoCo · Docker · GitHub Actions + GHCR · Kong 3.9 DB-less · K
 - [Matriz de cumplimiento](#matriz-de-cumplimiento)
 - [Decisiones de diseño](#decisiones-de-diseño)
 - [Flujo del pipeline](#flujo-del-pipeline)
+- [Evidencia del pipeline](#evidencia-del-pipeline)
 - [Cómo ejecutar](#cómo-ejecutar)
 - [La API](#la-api)
 - [Integración continua](#integración-continua)
@@ -54,7 +55,7 @@ Cada entregable de la prueba, dónde está implementado y qué lo verifica.
 | Promueve **el mismo** artefacto a dev, qa y prod | *Build once*: el jar probado entra en la imagen sin recompilar; la imagen que pasó la prueba de humo se publica tal cual y se despliega **por digest** ([`desplegar-ambiente.sh`](scripts/cd/desplegar-ambiente.sh) rechaza cualquier referencia que no sea `@sha256:`) | Etiqueta `com.izalco.jar.sha256` en la imagen; el mismo digest en los tres jobs de despliegue |
 | Identidad de servicio, nunca usuario personal | `GITHUB_TOKEN` efímero del workflow; `permissions: contents: read` en todo y `packages: write` solo en `publicar` | [`cd.yml`](.github/workflows/cd.yml) |
 | Políticas de API como código (rate limiting y client ID) | [`gateway/kong-dev.yaml`](gateway/kong-dev.yaml), [`kong-qa.yaml`](gateway/kong-qa.yaml), [`kong-prod.yaml`](gateway/kong-prod.yaml): `key-auth` (header `client_id`) y `rate-limiting` 30 / 60 / 120 por minuto; llave desde el secreto de cada environment | Job `config-ambientes` ([`validar-config-ambientes.sh`](scripts/ci/validar-config-ambientes.sh): `kong config parse`, sin llaves escritas, límites distintos); [`smoke-ambiente.sh`](scripts/cd/smoke-ambiente.sh): 401 sin llave, 201 con llave, 429 al superar el límite |
-| Aprobación manual antes de prod; quien aprueba no puede ser el autor | Environment `prod` con *required reviewers*, *prevent self-review*, sin bypass de administradores y solo tags `v*.*.*` ([configuración](#configurar-los-environments-en-github)); además, [ventana de cambio](scripts/cd/ventana-de-cambio.sh) evaluada después de la aprobación | Job `desplegar-prod` en espera de revisión en el run de CD |
+| Aprobación manual antes de prod; quien aprueba no puede ser el autor | Environment `prod` con *required reviewers*, *prevent self-review*, sin bypass de administradores y solo tags `v*.*.*` ([configuración](#configurar-los-environments-en-github)); además, [ventana de cambio](scripts/cd/ventana-de-cambio.sh) evaluada después de la aprobación | [Evidencia](#evidencia-del-pipeline): release `v1.0.0` aprobado por otra cuenta (`Jonathanalva1`); el autor del tag no puede aprobar |
 
 ### 3. Diagnóstico y 4. Documentación
 
@@ -122,6 +123,27 @@ flowchart TD
 Las pruebas de humo de cada ambiente verifican health `UP` con el perfil correcto, `401` sin `client_id`, `201` de punta
 a punta y `429` al superar el límite. Si cualquier paso falla, la promoción se detiene ahí y el digest no llega a los
 ambientes siguientes.
+
+## Evidencia del pipeline
+
+Release **`v1.0.0`**: [run CD #1](https://github.com/JonathanAva/transferencia-api/actions/runs/41869436171), disparado por
+el tag sobre el merge del PR #2 a `main`. Los 10 jobs terminaron en verde en unos 8 minutos.
+
+**1. Prod queda en espera de aprobación.** Validación de versión, CI completo, publicación en GHCR, dev y qa ya pasaron;
+`Desplegar en prod` espera un revisor (*waiting for review*). El tag lo creó `JonathanAva`.
+
+![CD #1 esperando la aprobación de prod](docs/capturas/01-prod-esperando-aprobacion.png)
+
+**2. Aprueba una persona distinta del autor.** La revisión la hace `Jonathanalva1`, segunda cuenta configurada como revisora
+del environment `prod`. Con *prevent self-review*, a `JonathanAva` (autor del tag) GitHub **no le muestra la opción de
+aprobar**. La API de Actions registra la aprobación: `Jonathanalva1 · approved · prod · "Aprobado para release v1.0.0"`.
+
+![Revisión del despliegue a prod por Jonathanalva1](docs/capturas/02-aprobacion-por-otro-revisor.png)
+
+**3. Release completo.** Tras la aprobación, `Desplegar en prod` pasa la ventana de cambio, la verificación del
+`client_id` y la prueba de humo; el run termina en *Success*.
+
+![CD #1 completo en verde](docs/capturas/03-cd-completo-en-verde.png)
 
 ## Cómo ejecutar
 
