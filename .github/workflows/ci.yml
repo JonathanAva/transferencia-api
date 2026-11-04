@@ -22,6 +22,20 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # El workflow de release (cd.yml) reutiliza este mismo CI: un release pasa exactamente por los mismos
+  # controles que un PR. Con guardar-imagen, el job imagen guarda la imagen ya probada para publicarla tal cual.
+  workflow_call:
+    inputs:
+      guardar-imagen:
+        type: boolean
+        default: false
+      version:
+        type: string
+        default: ""
+    outputs:
+      jar-sha256:
+        description: SHA-256 del jar que pasó verify
+        value: ${{ jobs.build.outputs.jar-sha256 }}
 
 permissions:
   contents: read
@@ -158,17 +172,33 @@ jobs:
       - name: Construir la imagen (sin recompilar)
         env:
           SHA_JAR: ${{ needs.build.outputs.jar-sha256 }}
+          VERSION: ${{ inputs.version }}
         run: |
           docker build \
             --build-context jar=artefacto \
             --build-arg JAR_SHA256="$SHA_JAR" \
-            --build-arg VERSION="ci-${GITHUB_SHA::12}" \
+            --build-arg VERSION="${VERSION:-ci-${GITHUB_SHA::12}}" \
             --build-arg REVISION="$GITHUB_SHA" \
             --tag transferencia-api:ci .
           docker image inspect transferencia-api:ci --format '{{json .Config.Labels}}'
 
       - name: Prueba de humo (arranca con PostgreSQL y responde health UP)
         run: bash scripts/ci/smoke-imagen.sh transferencia-api:ci
+
+      # Solo en un release: se guarda LA imagen que acaba de pasar la prueba de humo. El job "publicar"
+      # de cd.yml la carga y la sube a GHCR sin reconstruirla (build once también para la imagen).
+      - name: Guardar la imagen probada
+        if: inputs.guardar-imagen
+        run: docker save transferencia-api:ci | gzip -1 > imagen-probada.tar.gz
+
+      - name: Publicar la imagen probada como artefacto
+        if: inputs.guardar-imagen
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: imagen-probada
+          path: imagen-probada.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Publicar log de la prueba de humo
         if: failure()

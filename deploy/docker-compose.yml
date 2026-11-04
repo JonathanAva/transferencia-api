@@ -1,0 +1,72 @@
+# Ambiente efímero que levanta el pipeline en el runner para cada ambiente (dev, qa, prod).
+# No se usa a mano: lo arranca scripts/cd/desplegar-ambiente.sh, que define las variables.
+#
+#   IMAGEN       ghcr.io/jonathanava/transferencia-api@sha256:...   (SIEMPRE por digest)
+#   AMBIENTE     dev | qa | prod   (perfil de Spring y archivo gateway/kong-<ambiente>.yaml)
+#   KONG_CONFIG  ruta al kong.yaml ya completado con el secreto del environment
+#   DB_PASSWORD  aleatoria por ejecución
+#
+# En un ambiente real, PostgreSQL y el core serían los del banco (URLs y credenciales del Secret del
+# ambiente); aquí son contenedores desechables para poder probar la imagen y las políticas de verdad.
+
+name: transferencias-${AMBIENTE:?}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: transferencias
+      POSTGRES_USER: transferencias
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transferencias -d transferencias"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  core-simulado:
+    image: wiremock/wiremock:3.13.2
+    volumes:
+      - ../wiremock:/home/wiremock:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/__admin/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  transferencia-api:
+    image: ${IMAGEN:?}
+    depends_on:
+      postgres: { condition: service_healthy }
+      core-simulado: { condition: service_healthy }
+    environment:
+      SPRING_PROFILES_ACTIVE: ${AMBIENTE}
+      DB_URL: jdbc:postgresql://postgres:5432/transferencias
+      DB_USUARIO: transferencias
+      DB_PASSWORD: ${DB_PASSWORD}
+      CORE_URL: http://core-simulado:8080/core/transferencias
+      # Credenciales del simulador (falsas, las mismas de wiremock/mappings).
+      CORE_USUARIO: usuario-local
+      CORE_PASSWORD: clave-falsa-solo-local
+    ports:
+      - "127.0.0.1:8080:8080"   # solo para la prueba de health; el tráfico de negocio entra por Kong
+
+  kong:
+    image: kong:3.9.1
+    depends_on:
+      transferencia-api: { condition: service_healthy }
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yaml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_STATUS_LISTEN: 0.0.0.0:8100
+      KONG_ADMIN_LISTEN: "off"
+    volumes:
+      - ${KONG_CONFIG:?}:/kong/kong.yaml:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
