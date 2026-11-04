@@ -9,6 +9,7 @@
 # - Cada despliegue usa un GitHub Environment (dev, qa, prod) con sus propios secretos.
 #   prod exige aprobación manual de un revisor distinto de quien creó el tag (prevent self-review)
 #   y solo acepta tags de release: ninguna rama (incluida hotfix/*) puede desplegar ni saltarse la aprobación.
+#   Además, prod solo se despliega dentro de la ventana de cambio (lunes a jueves; por defecto 08:00–15:59 UTC-6).
 # - Destino: no hay clúster persistente gratuito, así que cada job levanta el ambiente de forma efímera en el
 #   runner (imagen por digest + Kong con su política + PostgreSQL y core simulados) y ejecuta la prueba de humo.
 #   En un banco real, el mismo job aplicaría k8s/overlays/<ambiente> en un clúster autenticándose por OIDC.
@@ -200,6 +201,15 @@ jobs:
       AMBIENTE_DESTINO: prod
     steps:
       - *obtener-codigo
+      # Incidente: se desplegó a prod un viernes por la tarde. Este paso corre DESPUÉS de la aprobación,
+      # así que aprobar fuera de ventana tampoco despliega. Sin excepciones por rama ni por usuario.
+      # Horas: variables del repositorio (por defecto 8 y 16). Los límites (lunes a jueves, 06:00–18:00)
+      # están en el script y solo cambian con un PR.
+      - name: Ventana de cambio de prod (lunes a jueves, hora de El Salvador)
+        env:
+          VENTANA_HORA_INICIO: ${{ vars.VENTANA_PROD_HORA_INICIO }}
+          VENTANA_HORA_FIN: ${{ vars.VENTANA_PROD_HORA_FIN }}
+        run: bash scripts/cd/ventana-de-cambio.sh
       # Incidente: prod usaba el mismo apiId que QA. Se compara la HUELLA (SHA-256) del client_id de prod con la de
       # dev y qa: si coinciden, el ambiente comparte credencial y no se despliega. La credencial nunca sale del job.
       - name: El client_id de prod no se comparte con otro ambiente

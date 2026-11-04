@@ -125,6 +125,7 @@ flowchart LR
 | Identidad de servicio | `GITHUB_TOKEN` efímero; `packages: write` solo en `publicar`; el resto, solo lectura |
 | Aprobación antes de prod | Environment `prod` con *required reviewers* y *prevent self-review* |
 | Ninguna rama se salta la aprobación | Environment `prod` acepta solo tags `v*.*.*`; las ramas (incluida `hotfix/*`) no pueden desplegar |
+| Ventana de cambio | [`ventana-de-cambio.sh`](scripts/cd/ventana-de-cambio.sh): prod solo de lunes a jueves, por defecto 08:00–15:59 (UTC-6), evaluado **después** de la aprobación; horas en variables del repositorio, límites fijos en el código; sus casos se prueban en cada PR. Emergencias: [proceso de cambio de emergencia](#cambio-de-emergencia-fuera-de-la-ventana) |
 | Credenciales por ambiente | Secreto `CLIENT_ID_APP_MOVIL` en cada environment; prod falla si su huella coincide con la de dev o qa |
 | Políticas de API como código | `gateway/kong-<ambiente>.yaml`: `key-auth` (header `client_id`) y `rate-limiting` 30 / 60 / 120 por minuto |
 
@@ -181,6 +182,25 @@ disponibles en repositorios públicos o en planes pagos.
    - *Deployment branches and tags*: **Selected branches and tags**, solo la regla de tipo **Tag** `v*.*.*`. Así
      ninguna rama (`main`, `hotfix/*`…) puede desplegar en prod.
 4. *(Opcional)* **Wait timer** en `prod` (p. ej. 5 minutos) para tener un margen de cancelación.
+5. **Horario de la ventana de cambio** *(opcional; sin ellas: 08:00–15:59)*. *Settings → Secrets and variables → Actions →
+   Variables → New repository variable*: `VENTANA_PROD_HORA_INICIO` (p. ej. `8`) y `VENTANA_PROD_HORA_FIN` (p. ej. `16`,
+   hora no incluida). Cada run de CD deja en su resumen la ventana que aplicó.
+   - Una variable se cambia sin PR. Por eso los **límites** están en el script y solo cambian con un PR revisado: solo
+     de lunes a jueves, inicio desde las 06:00, fin hasta las 18:00. Si las variables piden algo fuera de eso, el
+     despliegue falla.
+
+### Cambio de emergencia fuera de la ventana
+
+El pipeline **no** tiene un botón de *bypass*: una excepción automática es justo lo que permitió
+`Approval step: skipped (branch = hotfix/*)` en el incidente INC-2026-118. Una emergencia sigue un **control organizativo**:
+
+1. **Aprobación del responsable de cambios**, por escrito, antes de tocar nada.
+2. **Motivo registrado** en un issue `Cambio de emergencia`: impacto de no actuar, riesgo, plan de reversión y quién
+   aprueba en prod.
+3. **PR enlazado al issue** que amplía la ventana en el script. Pasa por el CI y la revisión normales. Después se crea
+   el tag y prod sigue exigiendo un revisor distinto del autor. Solo cambia la ventana; ningún otro control se apaga.
+4. **Revisión posterior** en un máximo de 2 días hábiles: ¿era una emergencia?, ¿qué falló?, y un PR que **restaura** la
+   ventana.
 
 ### Publicar una versión
 
@@ -343,3 +363,8 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
     Demuestra la promoción por digest, las políticas y la aprobación; no deja un servicio corriendo.
 34. **Versión del pom:** `main` queda en la última versión liberada (`1.0.0`) y la siguiente se fija en el PR que la
     prepara. Se descartó `-SNAPSHOT` en `main` porque obligaría a un commit extra en cada release.
+35. **Ventana de cambio de prod:** lunes a jueves, por defecto de 08:00 a 15:59, hora de El Salvador (UTC-6 todo el año).
+    Así siempre queda un día hábil después del despliegue. Las horas se ajustan con variables del repositorio, dentro de
+    límites fijos en el código (06:00–18:00, nunca viernes ni fin de semana). No hay excepción por rama ni por usuario:
+    las emergencias siguen el [proceso de cambio de emergencia](#cambio-de-emergencia-fuera-de-la-ventana). Los feriados
+    quedan fuera del alcance.
