@@ -1,36 +1,136 @@
 # transferencia-api — Banco Izalco Digital
 
-API para que la app móvil de Banco Izalco Digital registre y consulte transferencias
-interbancarias, integrándose con el core bancario legado (XML).
+API para que la app móvil de Banco Izalco Digital registre y consulte transferencias interbancarias,
+integrándose con el core bancario legado (XML), y la **plataforma de entrega** que la lleva a dev, qa y prod.
 
-> **Post-mortem del incidente INC-2026-118:** [`docs/postmortem-INC-2026-118.md`](docs/postmortem-INC-2026-118.md)
-> (configuración [original](docs/incidente/config-prod.original.yaml) y [corregida](docs/incidente/config-prod.corregido.yaml)).
-> Documento en construcción: la revisión final se agrega en la siguiente fase.
+**Idea central:** la API y el pipeline están diseñados para que el incidente INC-2026-118 no pueda repetirse.
+Prod apuntando al core de QA, transferencias duplicadas por reintentos, un SNAPSHOT desplegado con un usuario personal
+y sin aprobación: cada causa tiene un control que la detiene y una prueba o un check que lo demuestra.
 
-## Contrato de la API
+- **Post-mortem:** [`docs/postmortem-INC-2026-118.md`](docs/postmortem-INC-2026-118.md), con la configuración
+  [original](docs/incidente/config-prod.original.yaml) y [corregida](docs/incidente/config-prod.corregido.yaml).
+- **Contrato:** [`src/main/resources/openapi/transferencias.yaml`](src/main/resources/openapi/transferencias.yaml) (OpenAPI 3.1).
+- **Pipeline:** [`ci.yml`](.github/workflows/ci.yml) (cada PR) y [`cd.yml`](.github/workflows/cd.yml) (release por tag).
 
-El contrato es **contract-first** en OpenAPI 3.1:
-[`src/main/resources/openapi/transferencias.yaml`](src/main/resources/openapi/transferencias.yaml).
+**Stack:** Java 21 · Spring Boot 4.1.2 · PostgreSQL 17 + Flyway · Jackson 3 XML · JUnit 5, Testcontainers 2 y
+WireMock 3 · JaCoCo · Docker · GitHub Actions + GHCR · Kong 3.9 DB-less · Kustomize.
 
-| Método | Ruta | Descripción |
+## Contenido
+
+- [Matriz de cumplimiento](#matriz-de-cumplimiento)
+- [Decisiones de diseño](#decisiones-de-diseño)
+- [Flujo del pipeline](#flujo-del-pipeline)
+- [Cómo ejecutar](#cómo-ejecutar)
+- [La API](#la-api)
+- [Integración continua](#integración-continua)
+- [Release y despliegue (CD)](#release-y-despliegue-cd)
+- [Configuración por ambiente](#configuración-por-ambiente)
+- [Cadena de timeouts](#cadena-de-timeouts)
+- [Supuestos](#supuestos)
+- [Limitaciones y trabajo futuro](#limitaciones-y-trabajo-futuro)
+- [Uso de herramientas de IA](#uso-de-herramientas-de-ia)
+
+## Matriz de cumplimiento
+
+Cada entregable de la prueba, dónde está implementado y qué lo verifica.
+
+### 1. API
+
+| Requisito | Implementación | Verificación |
 |---|---|---|
-| `POST` | `/transferencias` | Registra una transferencia (requiere `X-Idempotency-Key`). |
-| `GET` | `/transferencias/{id}` | Consulta una transferencia en cualquier estado. |
+| Contrato OAS con `POST /transferencias` y `GET /transferencias/{id}` | [`transferencias.yaml`](src/main/resources/openapi/transferencias.yaml): headers, todos los códigos, ejemplos, Problem Details (RFC 9457) | Job `contrato` del CI: `redocly lint` ([`redocly.yaml`](redocly.yaml)) |
+| Transformación al formato del core | [`MapeadorCore`](src/main/java/com/izalco/transferencias/core/MapeadorCore.java) (UTC `yyyyMMddHHmmss`, glosa en mayúsculas ≤ 30, monto), [`SolicitudCore`](src/main/java/com/izalco/transferencias/core/xml/SolicitudCore.java), [`CodecXmlCore`](src/main/java/com/izalco/transferencias/core/CodecXmlCore.java) | [`MapeadorCoreTest`](src/test/java/com/izalco/transferencias/core/MapeadorCoreTest.java) (`14:32-06:00` → `20261001203210`, y las dos hipótesis del bug de hora), [`CodecXmlCoreTest`](src/test/java/com/izalco/transferencias/core/CodecXmlCoreTest.java) |
+| Respuestas del core → errores de negocio claros | [`TraductorRespuestaCore`](src/main/java/com/izalco/transferencias/core/TraductorRespuestaCore.java) (00 / 51 / 62 / 91 / desconocido), [`ClienteCore`](src/main/java/com/izalco/transferencias/core/ClienteCore.java), [`ManejadorErrores`](src/main/java/com/izalco/transferencias/api/ManejadorErrores.java), [`CodigoError`](src/main/java/com/izalco/transferencias/api/CodigoError.java) | [`TraductorRespuestaCoreTest`](src/test/java/com/izalco/transferencias/core/TraductorRespuestaCoreTest.java), [`ClienteCoreTest`](src/test/java/com/izalco/transferencias/core/ClienteCoreTest.java), [`RegistroTransferenciaTest`](src/test/java/com/izalco/transferencias/api/RegistroTransferenciaTest.java) |
+| Idempotencia con `X-Idempotency-Key` | [`ServicioTransferencias`](src/main/java/com/izalco/transferencias/dominio/ServicioTransferencias.java), [`IdempotenciaRepositorio`](src/main/java/com/izalco/transferencias/persistencia/IdempotenciaRepositorio.java) (`INSERT … ON CONFLICT DO NOTHING`), [`V2__crear_tabla_idempotencia.sql`](src/main/resources/db/migration/V2__crear_tabla_idempotencia.sql), [`HashSolicitud`](src/main/java/com/izalco/transferencias/idempotencia/HashSolicitud.java) | `RegistroTransferenciaTest`: replay, llave reutilizada, en proceso, llave atrapada, dos solicitudes simultáneas; [`PersistenciaTest`](src/test/java/com/izalco/transferencias/persistencia/PersistenciaTest.java) |
+| Configuración por ambiente sin credenciales en texto plano | [`application.yaml`](src/main/resources/application.yaml) + perfiles `dev` / `qa` / `prod` (solo variables de entorno), [`CoreProperties`](src/main/java/com/izalco/transferencias/config/CoreProperties.java) (*fail fast*), [`GuardiaAmbiente`](src/main/java/com/izalco/transferencias/config/GuardiaAmbiente.java), [`k8s/overlays`](k8s/overlays) | [`ArchivosDeConfiguracionTest`](src/test/java/com/izalco/transferencias/config/ArchivosDeConfiguracionTest.java) (el build falla si un YAML trae un secreto o una URL), [`GuardiaAmbienteTest`](src/test/java/com/izalco/transferencias/config/GuardiaAmbienteTest.java), [`CorePropertiesTest`](src/test/java/com/izalco/transferencias/config/CorePropertiesTest.java) |
+| Pruebas automatizadas, cobertura ≥ 80 %, incluida la caída del core | 184 pruebas; JaCoCo `check` con líneas ≥ 0.80 en `verify` ([`pom.xml`](pom.xml)) | [`CoreCaidoTest`](src/test/java/com/izalco/transferencias/api/CoreCaidoTest.java) (core apagado), `ClienteCoreTest` (conexión rechazada, timeouts, 91), `RegistroTransferenciaTest` (timeout de lectura sin duplicado); cobertura de líneas ≈ 98 % |
 
-Validar el contrato:
+### 2. Pipeline CI/CD
 
-```powershell
-npx --yes @redocly/cli@2.64.1 lint
+| Requisito | Implementación | Verificación |
+|---|---|---|
+| Compila, prueba y falla si no se cumple la cobertura | Job `build` de [`ci.yml`](.github/workflows/ci.yml): `mvnw verify` + [`verificar-evidencia.sh`](scripts/ci/verificar-evidencia.sh) (falla si no hay reporte o se ejecutaron 0 pruebas); job `CI completo` (un job *skipped* cuenta como fallo) | Checks obligatorios del ruleset de `main`; reportes de cobertura y pruebas como artefactos de cada run |
+| Publica un artefacto versionado | Job `validar-version` de [`cd.yml`](.github/workflows/cd.yml) (tag = versión del `pom`, sin SNAPSHOT, commit en `main`) y job `publicar` (GHCR, tags `X.Y.Z` y `sha-<commit>`) | Resumen del run de CD: tags y digest publicados |
+| Promueve **el mismo** artefacto a dev, qa y prod | *Build once*: el jar probado entra en la imagen sin recompilar; la imagen que pasó la prueba de humo se publica tal cual y se despliega **por digest** ([`desplegar-ambiente.sh`](scripts/cd/desplegar-ambiente.sh) rechaza cualquier referencia que no sea `@sha256:`) | Etiqueta `com.izalco.jar.sha256` en la imagen; el mismo digest en los tres jobs de despliegue |
+| Identidad de servicio, nunca usuario personal | `GITHUB_TOKEN` efímero del workflow; `permissions: contents: read` en todo y `packages: write` solo en `publicar` | [`cd.yml`](.github/workflows/cd.yml) |
+| Políticas de API como código (rate limiting y client ID) | [`gateway/kong-dev.yaml`](gateway/kong-dev.yaml), [`kong-qa.yaml`](gateway/kong-qa.yaml), [`kong-prod.yaml`](gateway/kong-prod.yaml): `key-auth` (header `client_id`) y `rate-limiting` 30 / 60 / 120 por minuto; llave desde el secreto de cada environment | Job `config-ambientes` ([`validar-config-ambientes.sh`](scripts/ci/validar-config-ambientes.sh): `kong config parse`, sin llaves escritas, límites distintos); [`smoke-ambiente.sh`](scripts/cd/smoke-ambiente.sh): 401 sin llave, 201 con llave, 429 al superar el límite |
+| Aprobación manual antes de prod; quien aprueba no puede ser el autor | Environment `prod` con *required reviewers*, *prevent self-review*, sin bypass de administradores y solo tags `v*.*.*` ([configuración](#configurar-los-environments-en-github)); además, [ventana de cambio](scripts/cd/ventana-de-cambio.sh) evaluada después de la aprobación | Job `desplegar-prod` en espera de revisión en el run de CD |
+
+### 3. Diagnóstico y 4. Documentación
+
+| Requisito | Dónde |
+|---|---|
+| Post-mortem INC-2026-118 (máximo una página): hallazgos, causa raíz, impacto, corrección inmediata y controles | [`docs/postmortem-INC-2026-118.md`](docs/postmortem-INC-2026-118.md), con [`config-prod` original y corregido](docs/incidente) |
+| README con decisiones de diseño y diagrama del pipeline | Este documento: [decisiones](#decisiones-de-diseño) y [flujo del pipeline](#flujo-del-pipeline) |
+
+## Decisiones de diseño
+
+| Decisión | Por qué | Alternativa descartada |
+|---|---|---|
+| **Contract-first** con OpenAPI 3.1, escrito a mano | El contrato es el acuerdo con la app móvil; obliga a decidir los casos difíciles (timeout, reintentos, rechazos) antes de programar | *Code-first* con springdoc: el contrato termina siendo "lo que salió" |
+| Paquetes por responsabilidad: `api`, `dominio`, `core`, `idempotencia`, `persistencia`, `config` | Cada parte se prueba aislada; las rarezas del core (XML, UTC, glosa) quedan en `core` (capa anticorrupción) | Un paquete por tipo técnico (controllers, services…) |
+| Timeout de **conexión** (2 s) y de **lectura** (15 s) separados | Si vence la conexión, el core no recibió nada y se puede reintentar (`503`). Si vence la lectura, pudo procesarla: `504`, `PENDIENTE_CONFIRMACION` y la llave **no** se libera | Un timeout único, como en el incidente: o se duplica o la app no puede recuperarse |
+| Sin reintentos automáticos hacia el core | El core no es idempotente: un reintento tras perder la respuesta cobra dos veces | Spring Retry / Resilience4j sobre el POST |
+| Idempotencia en **PostgreSQL** con `INSERT … ON CONFLICT DO NOTHING` | Atómica con varias réplicas y sobrevive a reinicios; replay con los mismos bytes y `Idempotent-Replayed: true` | Memoria o `synchronized` (no sirve con 2 réplicas), "SELECT y luego INSERT" (carrera), Redis (otra pieza que operar) |
+| La transferencia se guarda **antes** de llamar al core, y el core se llama **fuera** de transacción | Si el pod muere, queda rastro; con dos transacciones cortas, un core lento no agota el pool de conexiones (10 por defecto) ni tumba los GET | Llamar al core dentro de la transacción |
+| Llaves atrapadas (`EN_PROCESO` por más de lectura + 30 s) se cierran como inciertas | Un pod caído no deja la llave en `409` para siempre, y nunca se libera algo que pudo llegar al core | Liberarla automáticamente (posible duplicado) |
+| Fecha con `withOffsetSameInstant(UTC)` y `HH`; `fechaSolicitud` exige zona horaria | Corrige el bug de hora del incidente; las pruebas cubren `hh` y restar el offset | — |
+| Glosa: mayúsculas con `Locale.ROOT`, sin tildes y **truncada** a 30 | El límite es técnico del core; el concepto completo se guarda y se devuelve en el GET | Rechazar conceptos largos con 400 |
+| Monto con `BigDecimal` y `RoundingMode.UNNECESSARY` | Dinero exacto; si hubiera que redondear, falla en vez de redondear en silencio | `double` |
+| URLs y credenciales **solo** por variables de entorno; `GuardiaAmbiente` antes de crear cualquier bean | La configuración de un ambiente no viaja en el artefacto; prod no arranca con URLs de otro ambiente, ni siquiera Flyway llega a conectarse | URL de cada ambiente en su `application-<perfil>.yaml` (lo que se copió en el incidente) |
+| **Build once** y promoción por **digest** | Lo que se probó es exactamente lo que llega a prod: commit → jar (SHA-256) → imagen → digest → dev, qa, prod | Recompilar por ambiente o desplegar por tag (un tag se puede mover) |
+| `GITHUB_TOKEN` y GitHub Environments con revisor ≠ autor | Identidad de servicio efímera; la aprobación de prod no se puede saltar por rama ni por rol | Token personal o usuario de un proveedor (el incidente) |
+| Kong DB-less con `key-auth` y `rate-limiting` | Equivalente directo a Client ID Enforcement y Rate Limiting de Anypoint, versionado y revisable en un PR; sin Admin API, la política solo cambia con un commit | Anypoint (de pago) o un gateway con base de datos |
+| Ambientes efímeros en el runner; manifiestos de Kubernetes validados | No hay clúster gratuito persistente; el despliegue demuestra digest, políticas y aprobación con una prueba de humo real | kind o un clúster real con OIDC (siguiente paso) |
+| Job `CI completo` y paso de evidencia | Un job *skipped* cuenta como éxito para un ruleset, y `-DskipTests` deja el build en verde; los dos casos ahora fallan | Confiar solo en los checks individuales |
+| Ventana de cambio de prod (lunes a jueves) | Después de un despliegue siempre queda un día hábil con el equipo completo; las emergencias siguen un proceso organizativo | Un botón de *bypass* (lo que permitió saltar la aprobación en el incidente) |
+
+## Flujo del pipeline
+
+```mermaid
+flowchart TD
+    PR["Rama + pull request"] --> CI
+    subgraph CI["CI (ci.yml) — en cada PR"]
+        direction LR
+        C1["contrato<br/>Redocly lint"]
+        C2["config-ambientes<br/>Kustomize, Kong,<br/>ventana de cambio"]
+        C3["build<br/>mvnw verify<br/>cobertura ≥ 80 %<br/>+ evidencia"]
+        C4["imagen<br/>mismo jar, sin recompilar<br/>+ prueba de humo"]
+        C3 --> C4
+        C5{"CI completo<br/>¿todos en success?"}
+        C1 --> C5
+        C2 --> C5
+        C4 --> C5
+    end
+    C5 -- "no (falla, skipped o cancelled)" --> BLOQ["PR bloqueado"]
+    C5 -- sí --> MAIN["merge a main<br/>ruleset sin bypass"]
+    MAIN --> TAG["tag vX.Y.Z"]
+    TAG --> VAL{"¿pom = tag?<br/>¿sin SNAPSHOT?<br/>¿commit en main?"}
+    VAL -- no --> STOP1["release detenido"]
+    VAL -- sí --> CI2["el mismo CI completo"]
+    CI2 --> PUB["publicar en GHCR<br/>la imagen probada<br/>→ digest sha256"]
+    PUB --> DEV["dev<br/>digest + Kong + prueba de humo"]
+    DEV --> QA["qa<br/>digest + Kong + prueba de humo"]
+    QA --> APR{{"aprobación manual<br/>revisor ≠ autor, solo tags"}}
+    APR --> VEN{"¿ventana de cambio?<br/>lunes a jueves"}
+    VEN -- no --> STOP2["despliegue detenido"]
+    VEN -- sí --> CID{"¿client_id distinto<br/>de dev y qa?"}
+    CID -- no --> STOP3["despliegue detenido"]
+    CID -- sí --> PROD["prod<br/>digest + Kong + prueba de humo"]
 ```
 
-## Ejecutar en local
+Las pruebas de humo de cada ambiente verifican health `UP` con el perfil correcto, `401` sin `client_id`, `201` de punta
+a punta y `429` al superar el límite. Si cualquier paso falla, la promoción se detiene ahí y el digest no llega a los
+ambientes siguientes.
 
-Requisitos: Docker Desktop y JDK 21.
+## Cómo ejecutar
+
+**Requisitos:** Docker Desktop, JDK 21 y, para los scripts `.sh`, Git Bash. Los comandos son de PowerShell.
 
 ```powershell
-.\mvnw.cmd clean verify          # pruebas + gate de cobertura (usa Testcontainers: Docker encendido)
+.\mvnw.cmd clean verify          # 184 pruebas + gate de cobertura (Testcontainers: Docker encendido)
 docker compose up --build -d     # PostgreSQL + core simulado (WireMock) + API en http://localhost:8080
-.\scripts\probar-local.ps1       # recorre todos los escenarios del core
+.\scripts\probar-local.ps1       # recorre todos los escenarios del core y el replay
 docker compose down -v           # apaga todo y borra los datos
 ```
 
@@ -49,6 +149,44 @@ El core simulado ([`wiremock/mappings`](wiremock/mappings)) decide la respuesta 
 Las credenciales de `docker-compose.yml` son falsas y solo sirven en local; los puertos se publican en
 `127.0.0.1`. Si las credenciales del core no coinciden, el simulador responde `401` (la API lo traduce a `502`).
 
+**Ambiente completo con Kong** (el mismo que levanta el pipeline, con una imagen local en vez de un digest):
+
+```powershell
+docker build -t transferencia-api:local .
+$env:EXIGIR_DIGEST="0"; $env:CLIENT_ID_APP_MOVIL="llave-falsa-local"
+& "C:\Program Files\Git\bin\bash.exe" scripts/cd/desplegar-ambiente.sh qa transferencia-api:local
+# → health UP (qa), 401, 401, 201 y 429 en la solicitud 60
+```
+
+**Otras verificaciones locales:**
+
+```powershell
+npx --yes @redocly/cli@2.64.1 lint                                                   # contrato
+& "C:\Program Files\Git\bin\bash.exe" scripts/ci/verificar-evidencia.sh              # pruebas y cobertura realmente ejecutadas
+& "C:\Program Files\Git\bin\bash.exe" scripts/ci/validar-config-ambientes.sh         # manifiestos y políticas por ambiente
+& "C:\Program Files\Git\bin\bash.exe" scripts/ci/probar-ventana-de-cambio.sh         # ventana de cambio de prod
+```
+
+## La API
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `POST` | `/transferencias` | Registra una transferencia (requiere `X-Idempotency-Key`). `201` con `Location`. |
+| `GET` | `/transferencias/{id}` | Consulta una transferencia en cualquier estado (`200` o `404`). |
+
+| Situación | HTTP | `codigo` |
+|---|---|---|
+| Core `00` | 201 | `APROBADA` |
+| Core `51` / `62` (la transferencia queda guardada como `RECHAZADA`) | 422 | `SALDO_INSUFICIENTE` / `CUENTA_BLOQUEADA` |
+| Core `91`, conexión rechazada o timeout de conexión (la llave se libera) | 503 | `CORE_NO_DISPONIBLE` |
+| Timeout de lectura (`PENDIENTE_CONFIRMACION`, la llave no se libera) | 504 | `CORE_TIMEOUT` |
+| Código desconocido o respuesta inválida (`PENDIENTE_CONFIRMACION`) | 502 | `RESPUESTA_CORE_INVALIDA` |
+| Solicitud inválida / falta `X-Idempotency-Key` | 400 | `SOLICITUD_INVALIDA` / `IDEMPOTENCY_KEY_REQUERIDA` |
+| Misma llave con otro cuerpo / la primera sigue en curso | 422 / 409 | `IDEMPOTENCY_KEY_REUTILIZADA` / `SOLICITUD_EN_PROCESO` |
+
+Los errores usan Problem Details (RFC 9457) con las extensiones `codigo` y `correlationId`. `401` y `429` los emite
+Kong con su propio formato. Todas las respuestas llevan `X-Correlation-Id` (se genera si la app no lo envía).
+
 ## Integración continua
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) corre en cada push a `main` y en cada pull request:
@@ -56,17 +194,22 @@ Las credenciales de `docker-compose.yml` son falsas y solo sirven en local; los 
 ```mermaid
 flowchart LR
     A[push / PR] --> C[contrato<br/>Redocly lint]
+    A --> K[config-ambientes<br/>Kustomize, Kong,<br/>ventana de cambio]
     A --> B[build<br/>mvnw verify<br/>JDK 21 Temurin]
     B --> E{¿jacoco.xml existe<br/>y pruebas > 0?}
     E -- no --> X[falla]
     E -- sí --> R[artefactos:<br/>cobertura, pruebas,<br/>jar probado + SHA-256]
     R --> I[imagen<br/>docker build con<br/>EL MISMO jar]
     I --> S[prueba de humo<br/>PostgreSQL + health UP]
+    C --> F{CI completo:<br/>¿todos en success?}
+    K --> F
+    S --> F
 ```
 
 | Job | Qué hace | Falla si… |
 |---|---|---|
 | `contrato` | `redocly lint` del contrato OpenAPI | el contrato tiene errores o advertencias |
+| `config-ambientes` | [`validar-config-ambientes.sh`](scripts/ci/validar-config-ambientes.sh) y [`probar-ventana-de-cambio.sh`](scripts/ci/probar-ventana-de-cambio.sh) | un manifiesto o una política es inválido, prod tiene menos de 2 réplicas, un ambiente usa URLs de otro, o la ventana de cambio no se comporta como se espera |
 | `build` | `mvnw verify`: pruebas (Testcontainers) + gate JaCoCo ≥ 80 % de líneas | una prueba falla o la cobertura baja de 80 % |
 | | [`verificar-evidencia.sh`](scripts/ci/verificar-evidencia.sh) | no existe `jacoco.xml` o se ejecutaron 0 pruebas (p. ej. con `-DskipTests`) |
 | | Publica `reporte-cobertura`, `reporte-pruebas` y `jar-probado` (jar + SHA-256) | — |
@@ -111,24 +254,14 @@ Con esto nadie puede llevar a `main` un cambio que no haya pasado el CI, ni siqu
 
 ## Release y despliegue (CD)
 
-[`.github/workflows/cd.yml`](.github/workflows/cd.yml) se dispara **solo** al crear un tag `vX.Y.Z`:
-
-```mermaid
-flowchart LR
-    T[tag vX.Y.Z] --> V{versión del pom = tag?<br/>¿sin SNAPSHOT?<br/>¿commit en main?}
-    V -- no --> X[falla]
-    V -- sí --> C[CI completo<br/>mismo de los PR]
-    C --> P[publicar en GHCR<br/>imagen probada<br/>→ digest sha256]
-    P --> D[dev<br/>digest + Kong<br/>prueba de humo]
-    D --> Q[qa<br/>digest + Kong<br/>prueba de humo]
-    Q --> A{{aprobación manual<br/>revisor ≠ autor}}
-    A --> R[prod<br/>client_id propio<br/>digest + Kong<br/>prueba de humo]
-```
+[`.github/workflows/cd.yml`](.github/workflows/cd.yml) se dispara **solo** al crear un tag `vX.Y.Z` (ver el
+[flujo del pipeline](#flujo-del-pipeline)).
 
 | Control | Cómo |
 |---|---|
 | Sin SNAPSHOT, versión coherente | El job `validar-version` falla si el `pom` es SNAPSHOT o no coincide con el tag |
 | Solo código revisado | El commit del tag debe pertenecer a `main` (que exige PR + CI) |
+| Mismos controles que un PR | El release reutiliza [`ci.yml`](.github/workflows/ci.yml) completo (`workflow_call`), no una copia |
 | Mismo artefacto | La imagen que pasó el CI se publica **sin reconstruir** y se despliega por **digest** en los tres ambientes |
 | Identidad de servicio | `GITHUB_TOKEN` efímero; `packages: write` solo en `publicar`; el resto, solo lectura |
 | Aprobación antes de prod | Environment `prod` con *required reviewers* y *prevent self-review* |
@@ -236,6 +369,7 @@ desde un `Secret`). Ningún archivo de configuración contiene URLs ni contrase�
 | `CORE_TIMEOUT_CONEXION` | no (2 s) | Timeout para conectar con el core |
 | `CORE_TIMEOUT_LECTURA` | no (15 s) | Timeout para recibir la respuesta; debe superar el p95 real del core |
 | `IDEMPOTENCIA_EXPIRACION` | no (24 h) | Tiempo durante el cual se recuerda una llave |
+| `IDEMPOTENCIA_MARGEN_EN_PROCESO` | no (30 s) | Margen, sobre el timeout de lectura, para considerar atrapada una llave `EN_PROCESO` |
 | `DB_POOL_MAXIMO` | no (5 / 10 / 20) | Conexiones del pool por réplica (dev / qa / prod) |
 
 **Fail fast:** si falta una variable obligatoria, la aplicación no arranca.
@@ -247,6 +381,8 @@ Corre antes de crear cualquier bean, así que Flyway nunca llega a conectarse a 
 |---|---|---|---|
 | Logs | texto, `DEBUG` para `com.izalco` | JSON (ECS), `INFO` | JSON (ECS), `INFO` |
 | Pool de conexiones | 5 | 10 | 20 |
+| Réplicas (Kubernetes) | 1 | 1 | 2, con PDB |
+| Rate limiting (Kong) | 30 / min | 60 / min | 120 / min |
 
 Todos los logs llevan el `correlationId` y los números de cuenta enmascarados (`*****0300`); el concepto no
 se registra. Actuator expone solo `/actuator/health` (con `liveness` y `readiness`) e `/actuator/info`
@@ -264,7 +400,7 @@ app móvil (30 s)  >  gateway Kong (20 s)  >  API → core, lectura (15 s)  >  p
 | Eslabón | Valor de referencia | Configuración |
 |---|---|---|
 | App móvil | 30 s | Cliente HTTP de la app |
-| Gateway (Kong) | 20 s | `read_timeout` del servicio en Kong (Fase 7) |
+| Gateway (Kong) | 20 s | `read_timeout` del servicio en [`gateway/kong-<ambiente>.yaml`](gateway); `retries: 0` |
 | API → core (lectura) | 15 s | `CORE_TIMEOUT_LECTURA` |
 | API → core (conexión) | 2 s | `CORE_TIMEOUT_CONEXION` (debe ser menor que la lectura) |
 | Core | p95 medido por ambiente | Monitoreo; en el incidente el p95 fue 9.8 s con timeout de 5 s |
@@ -289,7 +425,10 @@ para una transferencia nueva.
 
 ## Supuestos
 
-Decisiones tomadas donde el enunciado no define el comportamiento:
+Decisiones tomadas donde el enunciado no define el comportamiento. La numeración se mantiene estable porque otros
+documentos la citan.
+
+### API y reglas de negocio
 
 1. **Formato de `X-Idempotency-Key`:** UUID generado por la app, uno por intento lógico de transferencia.
 2. **Validaciones de entrada:** cuentas de 6 a 20 dígitos y distintas entre sí; `bancoDestino` con
@@ -311,6 +450,9 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
    legible, más las extensiones `codigo` y `correlationId`.
 9. **Client ID y rate limiting:** los aplica el API Gateway (Kong); los errores `401` y `429` tienen
    el formato propio de Kong.
+
+### Integración con el core e idempotencia
+
 10. **Dos timeouts distintos hacia el core:**
     - *Conexión* (`CORE_TIMEOUT_CONEXION`, por defecto 2 s): si vence, o si la conexión es rechazada,
       la solicitud nunca llegó al core → `503 CORE_NO_DISPONIBLE` y la llave se libera.
@@ -342,11 +484,15 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
 21. **Errores de Spring no listados en el contrato** (ruta inexistente, 405, 415): Problem Details con
     `codigo` `SOLICITUD_INVALIDA` y su status real.
 22. **`Location`:** ruta relativa (`/transferencias/{id}`), válida según RFC 9110 y correcta detrás del gateway.
+
+### Configuración, logs y contenedor
+
 23. **Perfil sin ambiente:** sin `SPRING_PROFILES_ACTIVE` la aplicación arranca con la configuración común
     (útil en local). Los manifiestos de cada ambiente siempre fijan el perfil.
 24. **Guardia de prod por palabras completas:** se busca `qa`, `dev`, etc. como palabra separada en la URL, no
     como subcadena, para no rechazar hosts legítimos como `devoluciones.izalco.com`. No reemplaza la
-    validación de configuración del pipeline (Fase 7); es la última barrera dentro de la aplicación.
+    validación de configuración del pipeline ([`validar-config-ambientes.sh`](scripts/ci/validar-config-ambientes.sh));
+    es la última barrera dentro de la aplicación.
 25. **Datos que se registran en logs:** id, estado, cuentas enmascaradas (últimos 4 dígitos), banco, monto
     y referencia del core. No se registra el concepto (texto libre, puede contener datos personales).
 26. **Imagen:** `eclipse-temurin` con versión fija (`21.0.13_9-jre-noble`), usuario UID 10001. Las pruebas no
@@ -354,8 +500,11 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
 27. **Un solo Dockerfile para local y pipeline:** en local compila solo (cómodo); en el pipeline recibe el jar
     probado con `--build-context`. Se descartó un segundo Dockerfile "solo CI" porque dos archivos que
     deben producir la misma imagen terminan divergiendo.
+
+### Pipeline y despliegue
+
 28. **El CI no publica la imagen:** la construye y la prueba en cada push/PR, pero solo el workflow de
-    release (Fase 7, al crear un tag `vX.Y.Z`) la publica en GHCR. Así el registro solo contiene versiones
+    release (al crear un tag `vX.Y.Z`) la publica en GHCR. Así el registro solo contiene versiones
     de release, nunca imágenes de ramas.
 29. **Pruebas mínimas:** el paso de evidencia exige más de 0 pruebas, no un número fijo. Un mínimo fijo
     obligaría a cambiar el workflow cada vez que se agregan pruebas; borrar pruebas en masa ya lo detecta
@@ -376,5 +525,47 @@ Decisiones tomadas donde el enunciado no define el comportamiento:
     límites fijos en el código (06:00–18:00, nunca viernes ni fin de semana). No hay excepción por rama ni por usuario:
     las emergencias siguen el [proceso de cambio de emergencia](#cambio-de-emergencia-fuera-de-la-ventana). Los feriados
     quedan fuera del alcance.
+
+### Incidente
+
 36. **Hora del incidente:** el anexo indica que a las 4:55 p.m. la app móvil **reporta** el problema. Como los 504 empiezan
     a las 4:40, se asume que el despliegue fue antes de las 4:40 (el log del pipeline no trae hora).
+37. **Contraseña del incidente redactada:** [`config-prod.original.yaml`](docs/incidente/config-prod.original.yaml) conserva
+    la evidencia tal cual, salvo la contraseña, que se reemplaza por `<REDACTADA>`. Un secreto expuesto se considera
+    comprometido: se rota y no se vuelve a publicar.
+
+## Limitaciones y trabajo futuro
+
+- **Conciliación de `PENDIENTE_CONFIRMACION`:** fuera del alcance. Un proceso periódico consultaría al core y
+  pasaría cada pendiente a `APROBADA` o `RECHAZADA`.
+- **Alertas:** el post-mortem propone alertar por tasa de 504 y por p95 del core; no están implementadas. La base
+  existe: un log JSON (ECS) por transferencia con estado y código HTTP.
+- **Kubernetes real:** los manifiestos están validados en cada PR pero no se aplican; el siguiente paso es kind en el
+  runner, o un clúster real con OIDC y `kubectl apply -k` del overlay con la imagen por digest.
+- **Rate limiting compartido** (`policy: redis`), **purga de llaves vencidas** y **feriados** en la ventana de cambio.
+- **Cadena de suministro:** faltan firma de la imagen (`cosign`) y SBOM, escaneo de vulnerabilidades (Trivy) y de
+  secretos en el CI, y Dependabot para las actions y las imágenes base.
+- **Rollback:** hoy se hace volviendo a desplegar el digest anterior; faltaría un workflow explícito.
+
+## Uso de herramientas de IA
+
+Como permiten las reglas de la prueba, usé un asistente de IA (Claude, de Anthropic, en Claude Code) como apoyo
+durante todo el proyecto:
+
+- **Para qué:**
+  - proponer y redactar código, pruebas, workflows y documentación a partir de decisiones que discutí y tomé;
+  - revisar compatibilidad de versiones con Spring Boot 4.1.2;
+  - investigar comportamientos concretos, por ejemplo cómo resuelve Kong OSS las referencias de vault o por qué un
+    job aparecía como *skipped*.
+- **Cómo lo controlé:**
+  - trabajé por fases; antes de cada una pedí la explicación del enfoque y sus alternativas;
+  - revisé cada commit antes de hacerlo;
+  - toda versión y API se verificó contra la fuente oficial o probándola, nunca se dio por supuesta;
+  - cada afirmación del README y del post-mortem apunta a un archivo, una prueba o un check del pipeline que la
+    demuestra;
+  - las decisiones de diseño, los supuestos y los errores encontrados (incluido que el CI no pasaba en GitHub porque
+    `mvnw` no era ejecutable en Linux) están documentados, no ocultos.
+- **Límites:** no se compartieron credenciales reales ni datos de clientes; todos los valores sensibles del
+  repositorio son falsos evidentes o referencias a variables de entorno.
+
+La responsabilidad del resultado es mía: puedo explicar y defender cada decisión y cada parte del código.
